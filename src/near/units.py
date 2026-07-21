@@ -52,7 +52,9 @@ class Amount(int):
         Amount.near("0.25")
         Amount.yocto(1)
 
-    Being an ``int``, it compares and does arithmetic exactly.
+    Being an ``int``, it compares and does arithmetic exactly. Arithmetic
+    with a :class:`~near.tokens.TokenAmount` raises on either side rather
+    than silently mixing yoctoNEAR with token raw units.
     """
 
     def __new__(cls, value: str | int) -> Self:
@@ -116,27 +118,35 @@ class Amount(int):
         return f"Amount('{self}')"
 
     def __add__(self, other: Any) -> Any:
+        _reject_token_amount(other)
         return _wrap(super().__add__(other), type(self))
 
     def __radd__(self, other: Any) -> Any:
+        _reject_token_amount(other)
         return _wrap(super().__radd__(other), type(self))
 
     def __sub__(self, other: Any) -> Any:
+        _reject_token_amount(other)
         return _wrap(super().__sub__(other), type(self))
 
     def __rsub__(self, other: Any) -> Any:
+        _reject_token_amount(other)
         return _wrap(super().__rsub__(other), type(self))
 
     def __mul__(self, other: Any) -> Any:
+        _reject_token_amount(other)
         return _wrap(super().__mul__(other), type(self))
 
     def __rmul__(self, other: Any) -> Any:
+        _reject_token_amount(other)
         return _wrap(super().__rmul__(other), type(self))
 
     def __floordiv__(self, other: Any) -> Any:
+        _reject_token_amount(other)
         return _wrap(super().__floordiv__(other), type(self))
 
     def __mod__(self, other: Any) -> Any:
+        _reject_token_amount(other)
         return _wrap(super().__mod__(other), type(self))
 
     @classmethod
@@ -230,6 +240,19 @@ def _wrap(result: Any, cls: type) -> Any:
     if result is NotImplemented or not isinstance(result, int) or result < 0:
         return result
     return cls(result)
+
+
+def _reject_token_amount(other: Any) -> None:
+    """Refuse arithmetic that would fold token raw units into yoctoNEAR.
+
+    ``TokenAmount`` raises when an :class:`Amount` is on its left; this is the
+    mirror guard for when the ``Amount`` is on the left (``int`` would happily
+    add the two, silently producing a wrong NEAR value).
+    """
+    from .tokens import TokenAmount  # local import: tokens.py imports this module
+
+    if isinstance(other, TokenAmount):
+        raise UnitParseError(f"Cannot mix NEAR amounts and {other.symbol} token amounts")
 
 
 ZERO = Amount(0)

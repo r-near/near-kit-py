@@ -91,6 +91,24 @@ client.send_transaction(
 )
 ```
 
+### Tokens
+
+NEP-141 fungible tokens are first-class: amounts are human strings in the
+token's own decimals, and `register=True` batches the receiver's
+`storage_deposit` into the same atomic transaction when they aren't
+registered yet.
+
+```python
+client.ft_transfer("usdt.tether-token.near", "bob.near", "5.25 USDT", register=True)
+
+balance = client.ft_balance("usdt.tether-token.near")   # TokenAmount, exact int
+print(balance)                                          # 5.25 USDT
+balance.display                                         # Decimal('5.25')
+```
+
+NFTs (NEP-171) get the same treatment: `nft_transfer` attaches the required
+1 yoctoNEAR, `nft_token` / `nft_tokens_for_owner` cover lookups.
+
 ### Async
 
 `AsyncNear` is the same surface, awaited — for FastAPI services, relayers,
