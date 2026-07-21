@@ -18,6 +18,15 @@ from .keys import PublicKey, Signer
 from .models import AccessKeyView, AccountView, KeyInfo, TransactionResult
 from .nep413 import SignedMessage, sign_message as _nep413_sign
 from .rpc import AsyncRpcTransport, raise_for_execution_failure
+from .tokens import (
+    FTMetadata,
+    TokenAmount,
+    as_token_amount,
+    ft_transfer_action,
+    ft_transfer_call_action,
+    nft_transfer_action,
+    storage_deposit_action,
+)
 from .units import DEFAULT_GAS, ZERO, Amount, Gas
 from .wire import (
     Action,
@@ -63,6 +72,8 @@ class AsyncNear:
         )
         self._transport = AsyncRpcTransport(self.rpc_url, timeout=timeout, retries=retries)
         self._nonces = _core.NonceCache()
+        self._ft_meta: dict[str, FTMetadata] = {}
+        self._nft_meta: dict[str, dict[str, Any]] = {}
 
     @classmethod
     def from_file(
@@ -234,6 +245,114 @@ class AsyncNear:
             return TransactionResult.model_validate(result)
 
         raise last_error  # type: ignore[misc]
+
+    # ------------------------------------------------------------------
+    # Tokens (NEP-141 fungible, NEP-171 non-fungible)
+    # ------------------------------------------------------------------
+
+    async def ft_metadata(self, token_id: str) -> FTMetadata:
+        """The token's NEP-148 metadata, cached for the life of this client.
+
+        A client outliving an on-chain metadata change keeps serving the
+        cached value; construct a fresh client to re-read it.
+        """
+        if token_id not in self._ft_meta:
+            raw = await self.view(token_id, "ft_metadata")
+            self._ft_meta[token_id] = FTMetadata.model_validate(raw)
+        return self._ft_meta[token_id]
+
+    async def ft_balance(self, token_id: str, account_id: str | None = None) -> TokenAmount:
+        """The account's token balance (defaults to the signer's account)."""
+        metadata = await self.ft_metadata(token_id)
+        target = _core.default_account_id(self.signer, account_id)
+        raw = await self.view(token_id, "ft_balance_of", {"account_id": target})
+        return TokenAmount(int(raw), symbol=metadata.symbol, decimals=metadata.decimals)
+
+    async def ft_transfer(
+        self,
+        token_id: str,
+        receiver_id: str,
+        amount: str | TokenAmount,
+        *,
+        memo: str | None = None,
+        register: bool = False,
+        wait_until: str = _core.DEFAULT_WAIT,
+    ) -> TransactionResult:
+        """Send fungible tokens (attaches the 1 yoctoNEAR NEP-141 requires).
+
+        ``amount`` is human units, parsed against the token's metadata:
+        ``"5.25"`` or ``"5.25 USDT"``. With ``register=True``, an unregistered
+        receiver gets a ``storage_deposit`` batched into the same atomic
+        transaction (skipped when already registered).
+        """
+        value = as_token_amount(amount, await self.ft_metadata(token_id))
+        actions: list[AnyAction] = []
+        if (
+            register
+            and await self.view(token_id, "storage_balance_of", {"account_id": receiver_id}) is None
+        ):
+            bounds = await self.view(token_id, "storage_balance_bounds")
+            actions.append(storage_deposit_action(receiver_id, Amount.yocto(int(bounds["min"]))))
+        actions.append(ft_transfer_action(receiver_id, value, memo))
+        return await self.send_transaction(token_id, actions, wait_until=wait_until)
+
+    async def ft_transfer_call(
+        self,
+        token_id: str,
+        receiver_id: str,
+        amount: str | TokenAmount,
+        msg: str,
+        *,
+        memo: str | None = None,
+        gas: str | Gas = "100 Tgas",
+        wait_until: str = _core.DEFAULT_WAIT,
+    ) -> TransactionResult:
+        """Send tokens to a contract and invoke its ``ft_on_transfer`` in one go."""
+        value = as_token_amount(amount, await self.ft_metadata(token_id))
+        action = ft_transfer_call_action(receiver_id, value, msg, memo, gas)
+        return await self.send_transaction(token_id, [action], wait_until=wait_until)
+
+    async def nft_metadata(self, contract_id: str) -> dict[str, Any]:
+        """The collection's NEP-177 metadata, cached like :meth:`ft_metadata`."""
+        if contract_id not in self._nft_meta:
+            result = await self.view(contract_id, "nft_metadata")
+            self._nft_meta[contract_id] = cast("dict[str, Any]", result)
+        return self._nft_meta[contract_id]
+
+    async def nft_token(self, contract_id: str, token_id: str) -> dict[str, Any] | None:
+        """One token's on-chain record, or ``None`` if it does not exist."""
+        result = await self.view(contract_id, "nft_token", {"token_id": token_id})
+        return cast("dict[str, Any] | None", result)
+
+    async def nft_tokens_for_owner(
+        self,
+        contract_id: str,
+        account_id: str | None = None,
+        *,
+        from_index: int = 0,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Tokens owned by the account (defaults to the signer's account)."""
+        target = _core.default_account_id(self.signer, account_id)
+        result = await self.view(
+            contract_id,
+            "nft_tokens_for_owner",
+            {"account_id": target, "from_index": str(from_index), "limit": limit},
+        )
+        return cast("list[dict[str, Any]]", result)
+
+    async def nft_transfer(
+        self,
+        contract_id: str,
+        receiver_id: str,
+        token_id: str,
+        *,
+        memo: str | None = None,
+        wait_until: str = _core.DEFAULT_WAIT,
+    ) -> TransactionResult:
+        """Send an NFT (attaches the 1 yoctoNEAR NEP-171 requires)."""
+        action = nft_transfer_action(receiver_id, token_id, memo)
+        return await self.send_transaction(contract_id, [action], wait_until=wait_until)
 
     # ------------------------------------------------------------------
     # Off-chain signing (NEP-413) and meta-transactions (NEP-366)
