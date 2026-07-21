@@ -5,7 +5,6 @@ would fail and every transaction here would be rejected.
 """
 
 import asyncio
-from pathlib import Path
 
 import pytest
 
@@ -16,14 +15,11 @@ from near import (
     Near,
     add_full_access_key,
     create_account,
-    deploy_contract,
     generate_key,
     transfer,
 )
 from near.delegate import encode_signed_delegate
 from near.keys import KeyPairSigner, MlDsa65KeyPair
-
-GUESTBOOK_WASM = Path(__file__).parent.parent / "contracts" / "guestbook.wasm"
 
 pytestmark = pytest.mark.integration
 
@@ -82,24 +78,6 @@ class TestBasics:
     def test_module_one_shots(self):
         assert near_module.balance("sandbox", rpc_url="http://localhost:3030") > 0
         assert near_module.account_exists("sandbox", rpc_url="http://localhost:3030")
-
-
-@pytest.fixture(scope="session")
-def guestbook(near, run_id):
-    """Deploy the guestbook contract once per session."""
-    account_id = f"gb-{run_id}.{near.signer.account_id}"
-    key = generate_key()
-    near.send_transaction(
-        account_id,
-        actions=[
-            create_account(),
-            transfer("20 NEAR"),
-            add_full_access_key(key.public_key),
-            deploy_contract(GUESTBOOK_WASM.read_bytes()),
-        ],
-        wait_until="FINAL",
-    )
-    return account_id
 
 
 class TestContracts:

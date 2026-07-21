@@ -1,8 +1,11 @@
 import base64
 import time
 
-from near.keys import generate_key
-from near.nep413 import SignedMessage, generate_nonce, sign_message, verify_message
+import pytest
+
+from near.errors import InvalidKeyError
+from near.keys import KeyPairSigner, MlDsa65KeyPair, generate_key
+from near.nep413 import SignedMessage, generate_nonce, nep413_hash, sign_message, verify_message
 from near.testing import sandbox_signer
 
 
@@ -87,3 +90,34 @@ class TestSignVerify:
     def test_signature_is_base64(self):
         signed = sign_message(_signer(), "x", "y.near")
         assert len(base64.b64decode(signed.signature)) == 64
+
+
+class TestValidation:
+    def test_nonce_must_be_32_bytes(self):
+        with pytest.raises(ValueError, match="32 bytes"):
+            nep413_hash("hi", "app.near", b"short-nonce")
+
+    def test_non_ed25519_signer_rejected(self):
+        pq_signer = KeyPairSigner("pq.near", MlDsa65KeyPair(b"\x07" * 32))
+        with pytest.raises(InvalidKeyError, match="ed25519"):
+            sign_message(pq_signer, "hi", "app.near")
+
+    def test_verify_malformed_key_is_false(self):
+        nonce = generate_nonce()
+        signed = sign_message(_signer(), "login", "app.near", nonce=nonce)
+        mangled = SignedMessage(
+            account_id=signed.account_id,
+            public_key="ed25519:0000",  # invalid base58
+            signature=signed.signature,
+        )
+        assert not verify_message(mangled, "login", "app.near", nonce)
+
+    def test_verify_malformed_signature_is_false(self):
+        nonce = generate_nonce()
+        signed = sign_message(_signer(), "login", "app.near", nonce=nonce)
+        mangled = SignedMessage(
+            account_id=signed.account_id,
+            public_key=signed.public_key,
+            signature="x",  # not decodable base64
+        )
+        assert not verify_message(mangled, "login", "app.near", nonce)

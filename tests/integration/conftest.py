@@ -9,14 +9,24 @@ sandbox is reachable.
 import itertools
 import os
 import uuid
+from pathlib import Path
 
 import httpx
 import pytest
 
-from near import AsyncNear, Near
+from near import (
+    AsyncNear,
+    Near,
+    add_full_access_key,
+    create_account,
+    deploy_contract,
+    generate_key,
+    transfer,
+)
 from near.testing import sandbox_signer
 
 SANDBOX_URL = os.environ.get("NEAR_SANDBOX_URL", "http://localhost:3030")
+GUESTBOOK_WASM = Path(__file__).parent.parent / "contracts" / "guestbook.wasm"
 
 _account_counter = itertools.count(1)
 # Chain state persists across pytest runs, so account names must be unique per run.
@@ -62,3 +72,26 @@ def unique_id():
 @pytest.fixture(scope="session")
 def run_id():
     return _RUN_ID
+
+
+@pytest.fixture(scope="session")
+def sandbox_url():
+    return SANDBOX_URL
+
+
+@pytest.fixture(scope="session")
+def guestbook(near, run_id):
+    """Deploy the guestbook contract once per session."""
+    account_id = f"gb-{run_id}.{near.signer.account_id}"
+    key = generate_key()
+    near.send_transaction(
+        account_id,
+        actions=[
+            create_account(),
+            transfer("20 NEAR"),
+            add_full_access_key(key.public_key),
+            deploy_contract(GUESTBOOK_WASM.read_bytes()),
+        ],
+        wait_until="FINAL",
+    )
+    return account_id
