@@ -224,3 +224,9 @@ class TestAsyncSurface:
         result = await anear.send_delegate(payload, wait_until="FINAL")
         assert result.transaction_hash
         assert await anear.balance(recipient.account_id) == Amount("3 NEAR")
+
+        # Relaying the model object directly (not base64) works the same way.
+        signed_again = await as_user.sign_delegate(recipient.account_id, [transfer("1 NEAR")])
+        result = await anear.send_delegate(signed_again, wait_until="FINAL")
+        assert result.transaction_hash
+        assert await anear.balance(recipient.account_id) == Amount("4 NEAR")

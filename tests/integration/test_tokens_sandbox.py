@@ -190,4 +190,45 @@ class TestAsyncTokens:
     async def test_nft_views_mirror_sync(self, anear, nft):
         metadata = await anear.nft_metadata(nft)
         assert metadata["spec"] == "nft-1.0.0"
+        assert await anear.nft_metadata(nft) is metadata  # second read hits the cache
         assert await anear.nft_token(nft, "no-such-token") is None
+
+    async def test_ft_register_shortcuts_mirror_sync(self, anear, near, ft, unique_id):
+        gina = _make_account(near, unique_id)
+        await anear.ft_transfer(ft, gina.account_id, "1", register=True, wait_until="FINAL")
+        # Already registered: register=True skips the deposit, register=False sends bare.
+        await anear.ft_transfer(ft, gina.account_id, "0.5", register=True, wait_until="FINAL")
+        await anear.ft_transfer(ft, gina.account_id, "0.25", wait_until="FINAL")
+        assert await anear.ft_balance(ft, gina.account_id) == TokenAmount.parse(
+            "1.75", await anear.ft_metadata(ft)
+        )
+
+    async def test_ft_transfer_call_refund_mirrors_sync(self, anear, near, ft, unique_id):
+        henry = _make_account(near, unique_id)
+        await anear.ft_transfer(ft, henry.account_id, "1", register=True, wait_until="FINAL")
+        owner_before = await anear.ft_balance(ft)
+        with pytest.raises(ContractPanicError):
+            await anear.ft_transfer_call(ft, henry.account_id, "1", "a message", wait_until="FINAL")
+        assert await anear.ft_balance(ft) == owner_before  # refunded, not lost
+
+    async def test_nft_mint_enumerate_transfer_mirrors_sync(self, anear, near, nft, unique_id):
+        token_id = f"atoken-{unique_id}"
+        await anear.call(
+            nft,
+            "nft_mint",
+            {
+                "token_id": token_id,
+                "token_owner_id": near.signer.account_id,
+                "token_metadata": {"title": "near-kit async test token", "copies": 1},
+            },
+            deposit="0.1 NEAR",
+            wait_until="FINAL",
+        )
+        owned = await anear.nft_tokens_for_owner(nft)  # defaults to the signer
+        assert any(t["token_id"] == token_id for t in owned)
+
+        recipient = _make_account(near, f"{unique_id}an")
+        await anear.nft_transfer(nft, recipient.account_id, token_id, wait_until="FINAL")
+        token = await anear.nft_token(nft, token_id)
+        assert token is not None
+        assert token["owner_id"] == recipient.account_id

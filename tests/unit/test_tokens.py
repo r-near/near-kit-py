@@ -7,7 +7,7 @@ from pydantic import BaseModel, ValidationError
 
 from near import Amount, FTMetadata, TokenAmount
 from near.errors import UnitParseError
-from near.tokens import as_token_amount
+from near.tokens import _with_memo, as_token_amount
 
 USDT = FTMetadata(spec="ft-1.0.0", name="Tether USD", symbol="USDT", decimals=6)
 WBTC = FTMetadata(spec="ft-1.0.0", name="Wrapped BTC", symbol="WBTC", decimals=8)
@@ -67,6 +67,10 @@ class TestConstructor:
     def test_negative_rejected(self):
         with pytest.raises(UnitParseError):
             TokenAmount(-1, symbol="USDT", decimals=6)
+
+    def test_negative_decimals_rejected(self):
+        with pytest.raises(UnitParseError, match="decimals must be non-negative"):
+            TokenAmount(1, symbol="USDT", decimals=-1)
 
 
 class TestFormatting:
@@ -175,6 +179,12 @@ class TestArithmetic:
         assert not isinstance(result, TokenAmount)
         assert result == -1_000_000
 
+    def test_reflected_subtraction_preserves_token(self):
+        # int on the left still dispatches to TokenAmount.__rsub__ (subclass wins).
+        change = 10_000_000 - TokenAmount.parse("3", USDT)
+        assert isinstance(change, TokenAmount)
+        assert str(change) == "7 USDT"
+
     def test_comparison_is_exact(self):
         assert TokenAmount.parse("2", USDT) > TokenAmount.parse("1.999999", USDT)
 
@@ -263,3 +273,8 @@ class TestPydanticIntegration:
             self.Payload(amount=5_250_000)  # type: ignore[arg-type]
         with pytest.raises(ValidationError, match="without token metadata"):
             self.Payload(amount="5.25")  # type: ignore[arg-type]
+
+
+def test_with_memo_adds_memo_only_when_given():
+    assert _with_memo({"receiver_id": "bob"}, None) == {"receiver_id": "bob"}
+    assert _with_memo({"receiver_id": "bob"}, "thanks") == {"receiver_id": "bob", "memo": "thanks"}
