@@ -1,5 +1,6 @@
 import json
 
+import base58
 import pytest
 
 from near.errors import InvalidAccountIdError, InvalidKeyError
@@ -35,6 +36,10 @@ class TestTestSeedDerivation:
         with pytest.raises(InvalidKeyError):
             key_from_test_seed("x" * 33)
 
+    def test_empty_seed_rejected(self):
+        with pytest.raises(InvalidKeyError):
+            key_from_test_seed("")
+
 
 class TestEd25519:
     def test_generate_and_round_trip(self):
@@ -68,6 +73,15 @@ class TestEd25519:
         with pytest.raises(InvalidKeyError):
             Ed25519KeyPair(b"\x01" * 31)
 
+    def test_from_string_requires_prefix(self):
+        with pytest.raises(InvalidKeyError, match="must start with"):
+            Ed25519KeyPair.from_string("ml-dsa-65:whatever")
+
+    def test_repr_shows_public_key_only(self):
+        kp = generate_key()
+        assert repr(kp) == f"Ed25519KeyPair(public_key={kp.public_key})"
+        assert kp.secret_key not in repr(kp)
+
 
 class TestPublicKey:
     def test_parse_round_trip(self):
@@ -86,6 +100,24 @@ class TestPublicKey:
     def test_wrong_length_rejected(self):
         with pytest.raises(InvalidKeyError, match="32 bytes"):
             PublicKey.parse("ed25519:2VfE")
+
+    def test_invalid_base58_rejected(self):
+        # "0" is not in the base58 alphabet.
+        with pytest.raises(InvalidKeyError, match="Invalid base58"):
+            PublicKey.parse("ed25519:0000")
+
+    def test_repr_round_trips(self):
+        pk = generate_key().public_key
+        assert repr(pk) == f"PublicKey('{pk}')"
+
+    def test_secp256k1_parses_but_cannot_verify(self):
+        data = bytes(range(64))
+        key_string = "secp256k1:" + base58.b58encode(data).decode()
+        pk = PublicKey.parse(key_string)
+        assert pk.key_type == KeyType.SECP256K1
+        assert str(pk) == key_string
+        with pytest.raises(InvalidKeyError, match="not supported"):
+            pk.verify(b"sig", b"msg")
 
 
 class TestMlDsa65:
@@ -110,6 +142,18 @@ class TestMlDsa65:
         with pytest.raises(InvalidKeyError, match="view handle"):
             MlDsa65KeyPair.from_string("ml-dsa-65-hash:" + "1" * 32)
 
+    def test_wrong_seed_length_rejected(self):
+        with pytest.raises(InvalidKeyError, match="32 bytes"):
+            MlDsa65KeyPair(b"\x00" * 31)
+
+    def test_from_string_requires_prefix(self):
+        with pytest.raises(InvalidKeyError, match="must start with"):
+            MlDsa65KeyPair.from_string("ed25519:whatever")
+
+    def test_repr_hides_key_material(self):
+        kp = MlDsa65KeyPair(b"\x02" * 32)
+        assert repr(kp) == "MlDsa65KeyPair(public_key=PublicKey('ml-dsa-65:...'))"
+
 
 class TestParseKey:
     def test_dispatch(self):
@@ -121,6 +165,10 @@ class TestParseKey:
     def test_secp256k1_unsupported(self):
         with pytest.raises(InvalidKeyError, match="secp256k1"):
             parse_key("secp256k1:abc")
+
+    def test_unknown_prefix_rejected(self):
+        with pytest.raises(InvalidKeyError, match="Unsupported key type"):
+            parse_key("rsa:abc")
 
 
 class TestSeedPhrases:
@@ -142,6 +190,14 @@ class TestSeedPhrases:
     def test_invalid_phrase(self):
         with pytest.raises(InvalidKeyError):
             key_from_seed_phrase("not a valid phrase at all")
+
+    def test_invalid_word_count(self):
+        with pytest.raises(InvalidKeyError, match="word_count"):
+            generate_seed_phrase(13)
+
+    def test_non_hardened_path_rejected(self):
+        with pytest.raises(InvalidKeyError, match="Invalid derivation path"):
+            key_from_seed_phrase(generate_seed_phrase(), path="m/44'/397'/0")
 
     def test_derived_key_signs(self):
         kp = key_from_seed_phrase(generate_seed_phrase())
@@ -179,6 +235,15 @@ class TestCredentials:
     def test_missing_file(self, tmp_path):
         with pytest.raises(InvalidKeyError, match="No credentials file"):
             load_credentials("ghost.testnet", "testnet", credentials_dir=tmp_path)
+
+    def test_file_without_key_rejected(self, tmp_path):
+        creds_dir = tmp_path / "testnet"
+        creds_dir.mkdir()
+        (creds_dir / "keyless.testnet.json").write_text(
+            json.dumps({"account_id": "keyless.testnet"})
+        )
+        with pytest.raises(InvalidKeyError, match="no private_key"):
+            load_credentials("keyless.testnet", "testnet", credentials_dir=tmp_path)
 
 
 class TestAccountIds:
