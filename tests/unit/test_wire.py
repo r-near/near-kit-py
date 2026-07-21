@@ -1,6 +1,8 @@
 import hashlib
+from typing import cast
 
 import base58
+import pytest
 
 from near.actions import (
     add_full_access_key,
@@ -13,7 +15,8 @@ from near.actions import (
     stake,
     transfer,
 )
-from near.keys import generate_key, key_from_test_seed
+from near.errors import InvalidKeyError
+from near.keys import KeyType, PublicKey, generate_key, key_from_test_seed
 from near.wire import (
     DelegateAction,
     SignedTransaction,
@@ -21,6 +24,7 @@ from near.wire import (
     delegate_action_signing_hash,
     sign_transaction,
     to_wire_public_key,
+    to_wire_signature,
 )
 
 
@@ -196,6 +200,17 @@ class TestSigning:
             ],
         )
         assert Transaction.from_borsh(tx.to_borsh()) == tx
+
+
+class TestWireConversions:
+    def test_unknown_curve_rejected(self):
+        # A custom Signer could report a curve this library has no wire format
+        # for; the conversion must fail loudly rather than corrupt bytes.
+        fake_type = cast("KeyType", 99)
+        with pytest.raises(InvalidKeyError, match="Unsupported key type"):
+            to_wire_public_key(PublicKey(fake_type, b""))
+        with pytest.raises(InvalidKeyError, match="Unsupported key type"):
+            to_wire_signature(fake_type, b"sig")
 
 
 def _signer(account_id: str, key_pair):
