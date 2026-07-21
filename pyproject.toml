@@ -1,0 +1,148 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "near-kit"
+version = "0.1.0"
+description = "A Pythonic SDK for NEAR Protocol. Feels like requests."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    { name = "r-near" }
+]
+keywords = ["near", "blockchain", "sdk", "borsh", "web3", "crypto"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    "pydantic>=2.0",
+    "pyborsh>=1.0",
+    "httpx>=0.27",
+    "cryptography>=48",
+    "base58>=2.1",
+    "mnemonic>=0.21",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.26",
+    "pytest-cov>=6.0",
+    "ruff>=0.14",
+    "mypy>=1.18",
+    "pre-commit>=4.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/r-near/near-kit-py"
+Repository = "https://github.com/r-near/near-kit-py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/near"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "B", "C4", "UP", "RUF", "N", "SIM", "S", "A",
+    "COM", "C90", "DTZ", "EM", "EXE", "ISC", "ICN", "G", "INP", "PIE",
+    "T20", "PYI", "PT", "Q", "RSE", "RET", "SLF", "SLOT", "TID", "TCH",
+    "ARG", "PTH", "ERA", "PGH", "PL", "TRY", "FLY", "PERF", "FURB", "LOG",
+]
+ignore = [
+    "E501",     # line too long (handled by formatter)
+    "COM812",   # missing trailing comma (conflicts with formatter)
+    "ISC001",   # single line implicit string concatenation (conflicts with formatter)
+    "PLR2004",  # magic value comparison (too noisy)
+    "PLR0913",  # too many arguments (client methods have many options)
+    "TRY003",   # long exception messages (we want descriptive errors)
+    "EM101",    # string literal in exception (cleaner for simple cases)
+    "EM102",    # f-string in exception (cleaner for simple cases)
+    "TC001",    # Pydantic needs runtime-resolvable annotations
+    "TC003",    # Pydantic needs runtime-resolvable annotations
+    "PLC0415",  # lazy imports used deliberately to break import cycles
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "S101",     # assert is fine in tests
+    "ARG",      # unused arguments common in fixtures
+    "SLF001",   # private member access fine in tests
+    "PT011",    # broad pytest.raises fine when testing errors
+    "INP001",   # test dirs are not packages
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["near"]
+combine-as-imports = true
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.ruff.lint.pylint]
+max-args = 10
+max-branches = 15
+max-returns = 8
+max-statements = 50
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=near --cov-report=term-missing"
+asyncio_mode = "auto"
+markers = [
+    "integration: tests requiring a running NEAR sandbox at localhost:3030",
+]
+
+[tool.coverage.run]
+source = ["src/near"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+branch = "main"
+build_command = "pip install build && python -m build"
+commit_message = "chore(release): {version} [skip ci]"
+
+[tool.semantic_release.changelog]
+exclude_commit_patterns = [
+    "^chore\\(release\\):",
+    "^Merge",
+]
+
+[tool.semantic_release.remote]
+type = "github"
+
+[tool.semantic_release.publish]
+upload_to_vcs_release = true
