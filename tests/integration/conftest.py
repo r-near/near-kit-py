@@ -1,10 +1,13 @@
 """Integration fixtures: connect to a NEAR sandbox at localhost:3030.
 
 Start one with:  docker run -d -p 3030:3030 nearprotocol/sandbox:2.13.1
-Tests are skipped automatically when no sandbox is reachable.
+Override the URL with NEAR_SANDBOX_URL (e.g. to run parallel suites against
+containers on different ports). Tests are skipped automatically when no
+sandbox is reachable.
 """
 
 import itertools
+import os
 import uuid
 
 import httpx
@@ -13,7 +16,7 @@ import pytest
 from near import AsyncNear, Near
 from near.testing import sandbox_signer
 
-SANDBOX_URL = "http://localhost:3030"
+SANDBOX_URL = os.environ.get("NEAR_SANDBOX_URL", "http://localhost:3030")
 
 _account_counter = itertools.count(1)
 # Chain state persists across pytest runs, so account names must be unique per run.
