@@ -47,6 +47,11 @@ dev = [
 Homepage = "https://github.com/r-near/near-kit-py"
 Repository = "https://github.com/r-near/near-kit-py"
 
+# Auto-registers the sandbox fixtures when pytest is installed; pytest is
+# NOT a runtime dependency — without it this metadata is inert.
+[project.entry-points.pytest11]
+near = "near._pytest_plugin"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/near"]
 
