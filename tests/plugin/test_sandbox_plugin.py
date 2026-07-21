@@ -56,6 +56,13 @@ def test_patch_state_balance_reads_back(sandbox_near):
 
 def test_plugin_fixtures_end_to_end(pytester, near_sandbox, monkeypatch):
     """A fresh pytest run gets the fixtures via the entry point and reuses our sandbox."""
+    # This inner run is where the pytest11 entry point is genuinely exercised:
+    # the outer suite blocks it (-p no:near in addopts) so that importing near
+    # cannot predate pytest-cov's collector (see the root conftest.py). The
+    # pytester run autoloads the entry point for real because its fresh
+    # rootdir/ini inherits neither our addopts nor our conftest, and running
+    # in-process keeps the fixture code it executes visible to the outer
+    # suite's coverage collector.
     monkeypatch.setenv("NEAR_SANDBOX_URL", near_sandbox.rpc_url)
     # Minimal ini so pytest-asyncio (loaded in the inner run too) stays quiet.
     pytester.makeini("[pytest]\nasyncio_default_fixture_loop_scope = function\n")

@@ -117,7 +117,17 @@ warn_unused_ignores = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=near --cov-report=term-missing"
+# -p no:near blocks near's own pytest11 entry point for THIS repo's test runs:
+# autoloading it would import the whole near package while pytest registers
+# plugins, BEFORE pytest-cov starts its collector, leaving every module-level
+# statement in src/near unmeasured (Codecov fell 98.8% -> 56% when the entry
+# point landed). The root conftest.py loads the same plugin module after
+# coverage starts instead; the entry-point path itself is still exercised by
+# tests/plugin/test_sandbox_plugin.py. The bare --cov defers file selection to
+# [tool.coverage.run] source below (a path source, so pytest-cov's secondary
+# "combining" Coverage instance doesn't emit spurious module-not-measured
+# warnings that would drown out real measurement regressions).
+addopts = "--cov --cov-report=term-missing -p no:near"
 asyncio_mode = "auto"
 markers = [
     "integration: tests requiring a running NEAR sandbox at localhost:3030 (override with NEAR_SANDBOX_URL)",
