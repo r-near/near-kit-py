@@ -66,7 +66,10 @@ jobs:
         run: timeout 90 bash -c 'until curl -sf http://localhost:3030/status > /dev/null; do sleep 2; done'
 
       - name: Run tests with coverage
-        run: uv run pytest tests/ --cov=near --cov-report=xml --cov-report=term-missing
+        # --cov / -p no:near / term-missing come from addopts in pyproject.toml;
+        # --cov=near here would override the path-based source config and
+        # resurrect pytest-cov's spurious module-not-measured warning.
+        run: uv run pytest tests/ --cov-report=xml
 
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.12'

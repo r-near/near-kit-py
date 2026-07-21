@@ -16,6 +16,7 @@ import httpx
 import pytest
 
 import near._pytest_plugin as plugin
+import near.testing as testing_mod
 from near._pytest_plugin import LOCAL_SANDBOX_URL, pick_free_port, resolve_sandbox_url
 from near.client import Near
 from near.testing import fast_forward
@@ -179,6 +180,40 @@ class TestCreateContainer:
         assert removed == []
 
 
+class TestWaitUntilReady:
+    """The ready-wait polls the probe against the plugin's clock — faked here."""
+
+    def _clock(self, monkeypatch, ticks):
+        naps: list[float] = []
+        fake = SimpleNamespace(monotonic=lambda: next(ticks), sleep=naps.append)
+        monkeypatch.setattr(plugin, "time", fake)
+        return naps
+
+    def test_polls_until_reachable(self, monkeypatch):
+        naps = self._clock(monkeypatch, iter([0.0, 0.1, 0.2]))
+        answers = iter([False, True])
+        monkeypatch.setattr(plugin, "_reachable", lambda url: next(answers))
+        plugin._wait_until_ready("http://x", timeout=5.0)
+        assert naps == [1.0]  # one unready probe, one pause, then ready
+
+    def test_raises_when_never_ready(self, monkeypatch):
+        self._clock(monkeypatch, iter([0.0, 0.5, 9.9]))
+        monkeypatch.setattr(plugin, "_reachable", lambda url: False)
+        with pytest.raises(TimeoutError, match="did not become ready within 2s"):
+            plugin._wait_until_ready("http://x", timeout=2.0)
+
+
+def test_remove_container_forces_removal(monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *, check, capture_output):
+        calls.append(cmd)
+
+    monkeypatch.setattr(plugin.subprocess, "run", fake_run)
+    plugin._remove_container("sandbox-under-test")
+    assert calls == [["docker", "rm", "-f", "sandbox-under-test"]]
+
+
 class TestSandboxSessionLifecycle:
     """The fixture body must remove a launched container on every exit path."""
 
@@ -239,3 +274,27 @@ def test_fast_forward_rejects_nonpositive_delta():
     # Validation fires before the client is touched.
     with pytest.raises(ValueError, match="num_blocks must be >= 1"):
         fast_forward(cast("Near", object()), 0)
+
+
+class TestPollingTimeouts:
+    """The chain-poll helpers raise instead of spinning when nothing advances."""
+
+    class _StuckNode:
+        """A Near-shaped stub whose final height never moves."""
+
+        def rpc(self, method: str, params: dict) -> dict:
+            return {"header": {"height": 100}}
+
+    def _freeze_clock(self, monkeypatch, ticks):
+        fake = SimpleNamespace(monotonic=lambda: next(ticks), sleep=lambda s: None)
+        monkeypatch.setattr(testing_mod, "time", fake)
+
+    def test_fast_forward_times_out_when_height_stalls(self, monkeypatch):
+        self._freeze_clock(monkeypatch, iter([0.0, 1.0, 999.0]))
+        with pytest.raises(TimeoutError, match="did not advance 1 blocks"):
+            fast_forward(cast("Near", self._StuckNode()), 1)
+
+    def test_wait_one_block_times_out_when_no_block_lands(self, monkeypatch):
+        self._freeze_clock(monkeypatch, iter([0.0, 1.0, 999.0]))
+        with pytest.raises(TimeoutError, match="produced no new block"):
+            testing_mod._wait_one_block(cast("Near", self._StuckNode()))
