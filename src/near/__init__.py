@@ -64,7 +64,7 @@ from .nep413 import SignedMessage, generate_nonce, verify_message
 from .tokens import FTMetadata, TokenAmount
 from .units import DEFAULT_GAS, MAX_GAS, ONE_YOCTO, ZERO, Amount, Gas
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 
 # ---------------------------------------------------------------------------

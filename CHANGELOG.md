@@ -2,6 +2,26 @@
 
 <!-- version list -->
 
+## v1.2.0 (2026-07-21)
+
+### Bug Fixes
+
+- Harden TokenAmount value semantics per review ([#2](https://github.com/r-near/near-kit-py/pull/2),
+  [`79adc9a`](https://github.com/r-near/near-kit-py/commit/79adc9a4d367501077abafedc6d2b752b844bb46))
+
+### Features
+
+- **tokens**: NEP-141 FT and NEP-171 NFT helpers
+  ([#2](https://github.com/r-near/near-kit-py/pull/2),
+  [`79adc9a`](https://github.com/r-near/near-kit-py/commit/79adc9a4d367501077abafedc6d2b752b844bb46))
+
+### Testing
+
+- **sandbox**: Honor NEAR_SANDBOX_URL for the integration sandbox
+  ([#2](https://github.com/r-near/near-kit-py/pull/2),
+  [`79adc9a`](https://github.com/r-near/near-kit-py/commit/79adc9a4d367501077abafedc6d2b752b844bb46))
+
+
 ## v1.1.0 (2026-07-21)
 
 ### Bug Fixes
