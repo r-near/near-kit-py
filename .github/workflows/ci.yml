@@ -4,17 +4,35 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - run: uv sync --extra dev
-      - run: uv run ruff format --check .
-      - run: uv run ruff check .
-      - run: uv run mypy src
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Run ruff check
+        run: uv run ruff check src/ tests/
+
+      - name: Run ruff format check
+        run: uv run ruff format --check src/ tests/
+
+      - name: Run mypy
+        run: uv run mypy src/
 
   test:
     runs-on: ubuntu-latest
@@ -22,16 +40,38 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     services:
+      # A real nearcore node is the integration-test oracle — run it like a
+      # database service. Deterministic root key: near.testing.sandbox_signer().
       near-sandbox:
         image: nearprotocol/sandbox:2.13.1
         ports:
           - 3030:3030
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          version: "latest"
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv sync --extra dev
-      - run: uv run pytest
-      - uses: codecov/codecov-action@v5
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Wait for sandbox
+        run: timeout 90 bash -c 'until curl -sf http://localhost:3030/status > /dev/null; do sleep 2; done'
+
+      - name: Run tests with coverage
+        run: uv run pytest tests/ --cov=near --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage to Codecov
         if: matrix.python-version == '3.12'
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          fail_ci_if_error: false
