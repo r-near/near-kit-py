@@ -75,9 +75,9 @@ class TestBasics:
         block = near.rpc("block", {"finality": "final"})
         assert block["header"]["height"] > 0
 
-    def test_module_one_shots(self):
-        assert near_module.balance("sandbox", rpc_url="http://localhost:3030") > 0
-        assert near_module.account_exists("sandbox", rpc_url="http://localhost:3030")
+    def test_module_one_shots(self, sandbox_url):
+        assert near_module.balance("sandbox", rpc_url=sandbox_url) > 0
+        assert near_module.account_exists("sandbox", rpc_url=sandbox_url)
 
 
 class TestContracts:
