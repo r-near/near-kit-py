@@ -166,6 +166,20 @@ services:
     ports: ["3030:3030"]
 ```
 
+Or let pytest do all of it — installing near-kit registers a plugin. Its
+`near_sandbox` fixture reuses `NEAR_SANDBOX_URL` or localhost:3030 when
+reachable, otherwise starts (and later removes) a Docker sandbox on a free
+port; `sandbox_near` is a `Near` client signing as the root account:
+
+```python
+from near.testing import fast_forward
+
+
+def test_my_app(sandbox_near):
+    sandbox_near.send("alice.sandbox", "10 NEAR")
+    fast_forward(sandbox_near, 100)  # time travel: 100 blocks, no waiting
+```
+
 ## Meta-transactions (NEP-366)
 
 User signs, relayer pays gas:
