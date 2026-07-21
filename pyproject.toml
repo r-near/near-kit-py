@@ -131,6 +131,7 @@ exclude_lines = [
 
 [tool.semantic_release]
 version_toml = ["pyproject.toml:project.version"]
+version_variables = ["src/near/__init__.py:__version__"]
 branch = "main"
 build_command = "pip install build && python -m build"
 commit_message = "chore(release): {version} [skip ci]"
