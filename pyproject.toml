@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "near-kit"
-version = "1.0.1"
+version = "1.1.0"
 description = "A Pythonic SDK for NEAR Protocol. Feels like requests."
 readme = "README.md"
 license = "MIT"
