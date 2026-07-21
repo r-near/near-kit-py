@@ -125,6 +125,20 @@ class TestFungibleToken:
         assert near.ft_balance(ft) == owner_before
         assert near.ft_balance(ft, dave.account_id) == TokenAmount.parse("1", near.ft_metadata(ft))
 
+    def test_transfer_call_register_batches_storage_deposit(self, near, ft, unique_id):
+        # An unregistered receiver: without register= the transfer itself panics
+        # with "not registered"; with register=True the storage_deposit lands in
+        # the same transaction, so only the (missing) ft_on_transfer fails and
+        # the registration outlives the refund.
+        frank = _make_account(near, unique_id)
+        owner_before = near.ft_balance(ft)
+        with pytest.raises(ContractPanicError):
+            near.ft_transfer_call(
+                ft, frank.account_id, "1", "a message", register=True, wait_until="FINAL"
+            )
+        assert near.view(ft, "storage_balance_of", {"account_id": frank.account_id}) is not None
+        assert near.ft_balance(ft) == owner_before  # refunded, not lost
+
 
 class TestNonFungibleToken:
     def test_mint_enumerate_transfer(self, near, nft, unique_id):

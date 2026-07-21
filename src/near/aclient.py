@@ -268,6 +268,18 @@ class AsyncNear:
         raw = await self.view(token_id, "ft_balance_of", {"account_id": target})
         return TokenAmount(int(raw), symbol=metadata.symbol, decimals=metadata.decimals)
 
+    async def _registration_actions(
+        self, token_id: str, receiver_id: str, register: bool
+    ) -> list[AnyAction]:
+        """A ``storage_deposit`` for the receiver — empty if registered or not asked."""
+        if not register:
+            return []
+        balance = await self.view(token_id, "storage_balance_of", {"account_id": receiver_id})
+        if balance is not None:
+            return []
+        bounds = await self.view(token_id, "storage_balance_bounds")
+        return [storage_deposit_action(receiver_id, Amount.yocto(int(bounds["min"])))]
+
     async def ft_transfer(
         self,
         token_id: str,
@@ -286,13 +298,7 @@ class AsyncNear:
         transaction (skipped when already registered).
         """
         value = as_token_amount(amount, await self.ft_metadata(token_id))
-        actions: list[AnyAction] = []
-        if (
-            register
-            and await self.view(token_id, "storage_balance_of", {"account_id": receiver_id}) is None
-        ):
-            bounds = await self.view(token_id, "storage_balance_bounds")
-            actions.append(storage_deposit_action(receiver_id, Amount.yocto(int(bounds["min"]))))
+        actions = await self._registration_actions(token_id, receiver_id, register)
         actions.append(ft_transfer_action(receiver_id, value, memo))
         return await self.send_transaction(token_id, actions, wait_until=wait_until)
 
@@ -304,13 +310,20 @@ class AsyncNear:
         msg: str,
         *,
         memo: str | None = None,
+        register: bool = False,
         gas: str | Gas = "100 Tgas",
         wait_until: str = _core.DEFAULT_WAIT,
     ) -> TransactionResult:
-        """Send tokens to a contract and invoke its ``ft_on_transfer`` in one go."""
+        """Send tokens to a contract and invoke its ``ft_on_transfer`` in one go.
+
+        ``register=True`` batches a ``storage_deposit`` for an unregistered
+        receiver, exactly like :meth:`ft_transfer` — contracts must be
+        storage-registered on the token too.
+        """
         value = as_token_amount(amount, await self.ft_metadata(token_id))
-        action = ft_transfer_call_action(receiver_id, value, msg, memo, gas)
-        return await self.send_transaction(token_id, [action], wait_until=wait_until)
+        actions = await self._registration_actions(token_id, receiver_id, register)
+        actions.append(ft_transfer_call_action(receiver_id, value, msg, memo, gas))
+        return await self.send_transaction(token_id, actions, wait_until=wait_until)
 
     async def nft_metadata(self, contract_id: str) -> dict[str, Any]:
         """The collection's NEP-177 metadata, cached like :meth:`ft_metadata`."""
