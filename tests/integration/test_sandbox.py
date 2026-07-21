@@ -8,6 +8,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from conftest import SANDBOX_URL
 
 import near as near_module
 from near import (
@@ -80,8 +81,8 @@ class TestBasics:
         assert block["header"]["height"] > 0
 
     def test_module_one_shots(self):
-        assert near_module.balance("sandbox", rpc_url="http://localhost:3030") > 0
-        assert near_module.account_exists("sandbox", rpc_url="http://localhost:3030")
+        assert near_module.balance("sandbox", rpc_url=SANDBOX_URL) > 0
+        assert near_module.account_exists("sandbox", rpc_url=SANDBOX_URL)
 
 
 @pytest.fixture(scope="session")

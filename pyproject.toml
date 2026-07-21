@@ -115,7 +115,7 @@ testpaths = ["tests"]
 addopts = "--cov=near --cov-report=term-missing"
 asyncio_mode = "auto"
 markers = [
-    "integration: tests requiring a running NEAR sandbox at localhost:3030",
+    "integration: tests requiring a running NEAR sandbox at localhost:3030 (override with NEAR_SANDBOX_URL)",
 ]
 
 [tool.coverage.run]
