@@ -7,8 +7,10 @@ in sync when changing either.
 
 from __future__ import annotations
 
+import asyncio
 import base64 as b64
 from collections.abc import Sequence
+from contextlib import nullcontext
 from typing import Any, Self, cast
 
 from . import _core
@@ -78,6 +80,7 @@ class AsyncNear:
         )
         self._transport = AsyncRpcTransport(self.rpc_url, timeout=timeout, retries=retries)
         self._nonces = _core.NonceCache()
+        self._strict_locks: dict[str, asyncio.Lock] = {}
         self._ft_meta: dict[str, FTMetadata] = {}
         self._nft_meta: dict[str, dict[str, Any]] = {}
 
@@ -102,6 +105,7 @@ class AsyncNear:
         clone.__dict__.update(self.__dict__)
         clone.signer = signer
         clone._nonces = _core.NonceCache()  # noqa: SLF001
+        clone._strict_locks = {}  # noqa: SLF001
         return clone
 
     # ------------------------------------------------------------------
@@ -273,8 +277,9 @@ class AsyncNear:
         ``gas_key_index`` signs with the signer's gas key on that nonce lane
         (gas is then paid from the key's balance); ``strict_nonce`` demands
         the nonce be exactly the current one plus one instead of merely
-        larger. Either selects the V1 wire format — the default stays the
-        classic V0 bytes.
+        larger — concurrent strict sends on one key (or lane) therefore run
+        one at a time, where monotonic sends overlap freely. Either selects
+        the V1 wire format — the default stays the classic V0 bytes.
         """
         active = _core.require_signer(signer or self.signer)
         lane = _core.validate_gas_key_index(gas_key_index)
@@ -282,50 +287,56 @@ class AsyncNear:
         last_error: Exception | None = None
         strict_base: int | None = None  # the node-reported nonce after a strict-mode miss
 
-        for attempt in range(3):
-            if strict_nonce:
-                # Strict wants exactly current + 1, so the monotonic cache (which may
-                # run ahead of the chain) is bypassed for the freshest view.
-                if strict_base is None:
-                    strict_base = await self._fetch_nonce(active, lane, "optimistic")
-                nonce = strict_base + 1
-            else:
-                on_chain_nonce = None
-                if attempt or not self._nonces.has(key):
-                    on_chain_nonce = await self._fetch_nonce(active, lane, "final")
-                nonce = self._nonces.reserve(key, on_chain_nonce)
-            block = await self._transport.call("block", {"finality": "final"})
-            block_hash = _core.block_hash_of(block)
-            tx = _core.build_transaction(
-                active,
-                receiver_id,
-                list(actions),
-                nonce,
-                block_hash,
-                gas_key_index=lane,
-                strict_nonce=strict_nonce,
-            )
-            _, signed_raw = sign_transaction(tx, active)
-            try:
-                result = await self._transport.call(
-                    "send_tx",
-                    {
-                        "signed_tx_base64": b64.b64encode(signed_raw).decode(),
-                        "wait_until": wait_until,
-                    },
+        # Overlapping strict sends on one key (or gas-key lane) would each fetch the
+        # same nonce and collide, so they take turns: the key's lock is held from the
+        # fetch through the send and any nonce retry. Monotonic sends stay lock-free
+        # (the cache reserves a distinct nonce for each).
+        guard = self._strict_lock(key) if strict_nonce else nullcontext()
+        async with guard:
+            for attempt in range(3):
+                if strict_nonce:
+                    # Strict wants exactly current + 1, so the monotonic cache (which
+                    # may run ahead of the chain) is bypassed for the freshest view.
+                    if strict_base is None:
+                        strict_base = await self._fetch_nonce(active, lane, "optimistic")
+                    nonce = strict_base + 1
+                else:
+                    on_chain_nonce = None
+                    if attempt or not self._nonces.has(key):
+                        on_chain_nonce = await self._fetch_nonce(active, lane, "final")
+                    nonce = self._nonces.reserve(key, on_chain_nonce)
+                block = await self._transport.call("block", {"finality": "final"})
+                block_hash = _core.block_hash_of(block)
+                tx = _core.build_transaction(
+                    active,
+                    receiver_id,
+                    list(actions),
+                    nonce,
+                    block_hash,
+                    gas_key_index=lane,
+                    strict_nonce=strict_nonce,
                 )
-            except InvalidNonceError as exc:
-                last_error = exc
-                if exc.ak_nonce is not None:
-                    self._nonces.sync_to(key, exc.ak_nonce)
-                # Strict mode resumes from the node-reported nonce, or re-fetches
-                # when the node gave none — resending the same nonce cannot help.
-                strict_base = exc.ak_nonce
-                continue
-            self._nonces.sync_to(key, nonce)
-            if wait_until != "NONE":
-                raise_for_execution_failure(result)
-            return TransactionResult.model_validate(result)
+                _, signed_raw = sign_transaction(tx, active)
+                try:
+                    result = await self._transport.call(
+                        "send_tx",
+                        {
+                            "signed_tx_base64": b64.b64encode(signed_raw).decode(),
+                            "wait_until": wait_until,
+                        },
+                    )
+                except InvalidNonceError as exc:
+                    last_error = exc
+                    if exc.ak_nonce is not None:
+                        self._nonces.sync_to(key, exc.ak_nonce)
+                    # Strict mode resumes from the node-reported nonce, or re-fetches
+                    # when the node gave none — resending the same nonce cannot help.
+                    strict_base = exc.ak_nonce
+                    continue
+                self._nonces.sync_to(key, nonce)
+                if wait_until != "NONE":
+                    raise_for_execution_failure(result)
+                return TransactionResult.model_validate(result)
 
         raise last_error  # type: ignore[misc]
 
@@ -562,6 +573,13 @@ class AsyncNear:
             return int((await self._fetch_access_key(account_id, public_key, finality))["nonce"])
         nonces = await self._fetch_gas_key_nonces(account_id, public_key, finality)
         return _core.lane_nonce(nonces, gas_key_index, account_id, public_key)
+
+    def _strict_lock(self, key: str) -> asyncio.Lock:
+        """The lock serializing strict-nonce sends on one key/lane (made on first use)."""
+        lock = self._strict_locks.get(key)
+        if lock is None:
+            lock = self._strict_locks.setdefault(key, asyncio.Lock())
+        return lock
 
     async def _final_height(self) -> int:
         block = await self._transport.call("block", {"finality": "final"})

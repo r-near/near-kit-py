@@ -266,6 +266,8 @@ client.send_transaction(me, actions=[withdraw_from_gas_key(gas_pk, "1 NEAR")])
 
 Any key can also ask for `strict_nonce=True`, which makes the node accept
 only "current nonce + 1" — for pipelines that must stay strictly sequential.
+Concurrent strict sends on one key (or lane) take turns inside the client,
+so all of them land; ordinary sends keep overlapping freely.
 
 ## Deterministic accounts (NEP-616)
 

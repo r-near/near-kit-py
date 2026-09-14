@@ -92,6 +92,7 @@ class TestWithSigner:
             assert clone.signer is other
             assert clone._transport is near._transport
             assert clone._nonces is not near._nonces
+            assert clone._strict_locks is not near._strict_locks
             assert near.signer is signer  # original untouched
 
     async def test_async_clone_shares_pool_but_not_nonces(self, clean_env, signer):
@@ -101,6 +102,7 @@ class TestWithSigner:
             assert clone.signer is other
             assert clone._transport is near._transport
             assert clone._nonces is not near._nonces
+            assert clone._strict_locks is not near._strict_locks
 
 
 class TestOfflineSigning:

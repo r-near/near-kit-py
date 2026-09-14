@@ -6,8 +6,10 @@ mis-hashed V1 transaction would be rejected outright, so every passing test
 here is a byte-level proof.
 """
 
+import asyncio
 import base64
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 
 import base58
 import pytest
@@ -85,6 +87,12 @@ def publisher(near, run_id, guestbook_wasm):
 @pytest.fixture(scope="module")
 def code_hash(guestbook_wasm) -> str:
     return base58.b58encode(hashlib.sha256(guestbook_wasm).digest()).decode()
+
+
+@pytest.fixture(scope="module")
+def sink(near, run_id) -> str:
+    """The account the concurrency tests' transfers land in."""
+    return _funded(near, f"sink-{run_id}", "1 NEAR").account_id
 
 
 class TestGlobalContracts:
@@ -363,6 +371,93 @@ class TestGasKeys:
             )
         after = near.gas_key_nonces(gas_signer.account_id, gas_signer.public_key)
         assert after[1] == lanes[1] + 2
+
+
+def _assert_six_landed(results, nonce_before: int) -> None:
+    """Six distinct strict transactions carrying exactly the six nonces after ``nonce_before``."""
+    assert len({r.transaction_hash for r in results}) == 6
+    expected = list(range(nonce_before + 1, nonce_before + 7))
+    assert sorted(r.transaction["nonce"] for r in results) == expected
+    assert {r.transaction["nonce_mode"] for r in results} == {"strict"}
+
+
+class TestStrictNonceConcurrency:
+    """Strict mode wants exactly current + 1, so overlapping strict sends on one
+    key would all fetch the same nonce and collide (three of them exhaust the
+    retry budget). The client runs them one at a time per key and per gas-key
+    lane instead, so every one of them lands.
+    """
+
+    def test_threads_take_turns(self, near, unique_id, sink):
+        owner = _funded(near, unique_id)
+        as_owner = near.with_signer(owner)
+        nonce = near.access_key(owner.account_id, owner.public_key).nonce
+        before = near.balance(sink)
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            futures = [
+                pool.submit(
+                    as_owner.send_transaction, sink, [transfer("0.1 NEAR")], strict_nonce=True
+                )
+                for _ in range(6)
+            ]
+            results = [future.result() for future in futures]
+        _assert_six_landed(results, nonce)
+        assert near.balance(sink) - before == Amount("0.6 NEAR")
+
+    def test_threads_take_turns_on_one_lane(self, near, unique_id, sink):
+        gas_signer, as_gas = _gas_key_owner(near, unique_id)
+        lanes = near.gas_key_nonces(gas_signer.account_id, gas_signer.public_key)
+        before = near.balance(sink)
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            futures = [
+                pool.submit(
+                    as_gas.send_transaction,
+                    sink,
+                    [transfer("0.1 NEAR")],
+                    gas_key_index=1,
+                    strict_nonce=True,
+                )
+                for _ in range(6)
+            ]
+            results = [future.result() for future in futures]
+        _assert_six_landed(results, lanes[1])
+        assert {r.transaction["nonce_index"] for r in results} == {1}
+        after = near.gas_key_nonces(gas_signer.account_id, gas_signer.public_key)
+        assert after[1] == lanes[1] + 6
+        assert near.balance(sink) - before == Amount("0.6 NEAR")
+
+    async def test_tasks_take_turns(self, near, anear, unique_id, sink):
+        owner = _funded(near, unique_id)
+        as_owner = anear.with_signer(owner)
+        nonce = (await anear.access_key(owner.account_id, owner.public_key)).nonce
+        before = await anear.balance(sink)
+        results = await asyncio.gather(
+            *(
+                as_owner.send_transaction(sink, [transfer("0.1 NEAR")], strict_nonce=True)
+                for _ in range(6)
+            )
+        )
+        _assert_six_landed(results, nonce)
+        assert await anear.balance(sink) - before == Amount("0.6 NEAR")
+
+    async def test_tasks_take_turns_on_one_lane(self, near, anear, unique_id, sink):
+        gas_signer, _ = _gas_key_owner(near, unique_id)
+        as_gas = anear.with_signer(gas_signer)
+        lanes = await anear.gas_key_nonces(gas_signer.account_id, gas_signer.public_key)
+        before = await anear.balance(sink)
+        results = await asyncio.gather(
+            *(
+                as_gas.send_transaction(
+                    sink, [transfer("0.1 NEAR")], gas_key_index=1, strict_nonce=True
+                )
+                for _ in range(6)
+            )
+        )
+        _assert_six_landed(results, lanes[1])
+        assert {r.transaction["nonce_index"] for r in results} == {1}
+        after = await anear.gas_key_nonces(gas_signer.account_id, gas_signer.public_key)
+        assert after[1] == lanes[1] + 6
+        assert await anear.balance(sink) - before == Amount("0.6 NEAR")
 
 
 class TestAsyncSurface:

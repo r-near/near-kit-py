@@ -1,14 +1,17 @@
 """Client behavior only a node with a mind of its own can provoke.
 
-A scripted stdlib HTTP server (real sockets, no mocking) answers JSON-RPC
-from per-method reply queues and records what it was asked, so the strict
-nonce retry loop and the error shapes the sandbox never produces can be
-pinned down deterministically.
+A stdlib HTTP server (real sockets, no mocking) answers JSON-RPC from a
+reply function — per-method queues, or a node that enforces strict nonces —
+and records what it was asked, so the strict nonce retry loop, its per-key
+serialization and the error shapes the sandbox never produces can be pinned
+down deterministically.
 """
 
+import asyncio
 import base64
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import base58
@@ -19,17 +22,6 @@ from near.keys import KeyPairSigner, generate_key
 from near.wire import SignedTransactionV1
 
 BLOCK = {"result": {"header": {"hash": base58.b58encode(bytes(32)).decode(), "height": 100}}}
-SENT = {
-    "result": {
-        "status": {"SuccessValue": ""},
-        "transaction": {"hash": "tx", "nonce_mode": "strict"},
-        "transaction_outcome": {
-            "id": "tx",
-            "outcome": {"logs": [], "status": {"SuccessReceiptId": "r1"}},
-        },
-        "receipts_outcome": [],
-    }
-}
 UNKNOWN_ACCESS_KEY = {
     "error": {
         "name": "HANDLER_ERROR",
@@ -42,6 +34,23 @@ UNKNOWN_ACCESS_KEY = {
         "data": "access key ed25519:k does not exist while viewing",
     }
 }
+
+
+def _sent(tx_hash: str = "tx") -> dict:
+    return {
+        "result": {
+            "status": {"SuccessValue": ""},
+            "transaction": {"hash": tx_hash, "nonce_mode": "strict"},
+            "transaction_outcome": {
+                "id": tx_hash,
+                "outcome": {"logs": [], "status": {"SuccessReceiptId": "r1"}},
+            },
+            "receipts_outcome": [],
+        }
+    }
+
+
+SENT = _sent()
 
 
 def _access_key(nonce: int) -> dict:
@@ -67,20 +76,19 @@ def _sent_nonce(params: dict) -> int:
 
 
 @pytest.fixture
-def scripted_node():
-    """Start a JSON-RPC server that replies per method from a queue (the last reply repeats)."""
+def rpc_server():
+    """Start a JSON-RPC server answering from ``reply(method, params)``; records what it was asked."""
     servers = []
 
-    def start(script: dict[str, list[dict]]):
+    def start(reply):
         seen: list[tuple[str, dict]] = []
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 seen.append((request["method"], request["params"]))
-                queue = script[request["method"]]
-                reply = queue.pop(0) if len(queue) > 1 else queue[0]
-                body = json.dumps({"jsonrpc": "2.0", "id": request["id"], **reply}).encode()
+                answer = reply(request["method"], request["params"])
+                body = json.dumps({"jsonrpc": "2.0", "id": request["id"], **answer}).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -98,6 +106,47 @@ def scripted_node():
     for server in servers:
         server.shutdown()
         server.server_close()
+
+
+@pytest.fixture
+def scripted_node(rpc_server):
+    """A node replying per method from a queue (the last reply repeats)."""
+
+    def start(script: dict[str, list[dict]]):
+        def reply(method: str, params: dict) -> dict:
+            queue = script[method]
+            return queue.pop(0) if len(queue) > 1 else queue[0]
+
+        return rpc_server(reply)
+
+    return start
+
+
+@pytest.fixture
+def strict_node(rpc_server):
+    """A node enforcing strict nonces: a send lands only at current + 1 (advancing
+    the key); anything else is an InvalidNonce naming the current nonce.
+    """
+
+    def start(nonce: int):
+        state = {"nonce": nonce}
+        lock = threading.Lock()
+
+        def reply(method: str, params: dict) -> dict:
+            if method == "block":
+                return BLOCK
+            with lock:
+                if method == "query":
+                    return _access_key(state["nonce"])
+                sent = _sent_nonce(params)
+                if sent != state["nonce"] + 1:
+                    return _invalid_nonce(state["nonce"])
+                state["nonce"] = sent
+            return _sent(f"tx{sent}")
+
+        return rpc_server(reply)
+
+    return start
 
 
 def _signer():
@@ -162,6 +211,46 @@ class TestStrictNonceRecovery:
         async with AsyncNear(rpc_url=url, signer=_signer(), retries=0) as near:
             await near.send_transaction("bob.sandbox", [transfer("1 yocto")], strict_nonce=True)
         assert [_sent_nonce(p) for m, p in seen if m == "send_tx"] == [11, 31]
+
+
+def _assert_took_turns(results, seen) -> None:
+    """Six sends landed on the six nonces after 10, each fetching once: no collision, no retry."""
+    assert sorted(r.transaction_hash for r in results) == [f"tx{n}" for n in range(11, 17)]
+    assert [_sent_nonce(p) for m, p in seen if m == "send_tx"] == list(range(11, 17))
+    assert [m for m, _ in seen].count("query") == 6
+
+
+class TestStrictNonceSerialization:
+    """Overlapping strict sends on one key would each fetch the same nonce and
+    collide — three of them exhaust the retry budget — so the client runs them
+    one at a time per key: every send fetches once and lands on the next nonce.
+    """
+
+    def test_threads_take_turns(self, strict_node):
+        url, seen = strict_node(nonce=10)
+        with (
+            Near(rpc_url=url, signer=_signer(), retries=0) as near,
+            ThreadPoolExecutor(max_workers=6) as pool,
+        ):
+            futures = [
+                pool.submit(
+                    near.send_transaction, "bob.sandbox", [transfer("1 yocto")], strict_nonce=True
+                )
+                for _ in range(6)
+            ]
+            results = [future.result() for future in futures]
+        _assert_took_turns(results, seen)
+
+    async def test_tasks_take_turns(self, strict_node):
+        url, seen = strict_node(nonce=10)
+        async with AsyncNear(rpc_url=url, signer=_signer(), retries=0) as near:
+            results = await asyncio.gather(
+                *(
+                    near.send_transaction("bob.sandbox", [transfer("1 yocto")], strict_nonce=True)
+                    for _ in range(6)
+                )
+            )
+        _assert_took_turns(results, seen)
 
 
 class TestStructuredUnknownAccessKey:
