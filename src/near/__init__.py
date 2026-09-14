@@ -22,18 +22,25 @@ from .aclient import AsyncNear
 from .actions import (
     add_full_access_key,
     add_function_call_key,
+    add_gas_key,
     create_account,
     delete_account,
     delete_key,
     deploy_contract,
+    deterministic_state_init,
     function_call,
+    publish_contract,
     stake,
     transfer,
+    transfer_to_gas_key,
+    use_global_contract,
+    withdraw_from_gas_key,
 )
 from .client import Near
 from .errors import (
     AccessKeyNotFoundError,
     AccountNotFoundError,
+    ContractNotFoundError,
     ContractPanicError,
     InsufficientBalanceError,
     InvalidAccountIdError,
@@ -59,8 +66,9 @@ from .keys import (
     parse_key,
     validate_account_id,
 )
-from .models import AccessKeyView, AccountView, KeyInfo, TransactionResult
+from .models import AccessKeyView, AccountView, ContractCode, KeyInfo, TransactionResult
 from .nep413 import SignedMessage, generate_nonce, verify_message
+from .state_init import derive_deterministic_account_id, is_deterministic_account_id
 from .tokens import FTMetadata, TokenAmount
 from .units import DEFAULT_GAS, MAX_GAS, ONE_YOCTO, ZERO, Amount, Gas
 
@@ -120,6 +128,8 @@ __all__ = [
     "AccountView",
     "Amount",
     "AsyncNear",
+    "ContractCode",
+    "ContractNotFoundError",
     "ContractPanicError",
     "Ed25519KeyPair",
     "FTMetadata",
@@ -147,21 +157,29 @@ __all__ = [
     "account_exists",
     "add_full_access_key",
     "add_function_call_key",
+    "add_gas_key",
     "balance",
     "create_account",
     "delete_account",
     "delete_key",
     "deploy_contract",
+    "derive_deterministic_account_id",
+    "deterministic_state_init",
     "function_call",
     "generate_key",
     "generate_nonce",
     "generate_seed_phrase",
+    "is_deterministic_account_id",
     "is_valid_account_id",
     "key_from_seed_phrase",
     "parse_key",
+    "publish_contract",
     "stake",
     "transfer",
+    "transfer_to_gas_key",
+    "use_global_contract",
     "validate_account_id",
     "verify_message",
     "view",
+    "withdraw_from_gas_key",
 ]

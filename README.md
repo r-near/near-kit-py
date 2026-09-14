@@ -17,7 +17,8 @@ near.balance("alice.near")                       # -> Amount('42.5 NEAR')
 
 Human-readable everywhere — `"10 NEAR"` and `"30 Tgas"`, never
 `10000000000000000000000000`. Typed errors, exact integer math, sync *and*
-async, and post-quantum keys. The Python sibling of
+async, post-quantum keys, and the full nearcore 2.13 action set (global
+contracts, gas keys, deterministic accounts). The Python sibling of
 [near-kit](https://github.com/r-near/near-kit) for TypeScript.
 
 ## Install
@@ -161,7 +162,7 @@ Every error derives from `NearError` with a stable `.code` and a
 Run NEAR like you'd run postgres in CI:
 
 ```bash
-docker run -d -p 3030:3030 nearprotocol/sandbox:2.13.1
+docker run -d -p 3030:3030 nearprotocol/sandbox:2.13.4
 ```
 
 The sandbox root account's key is deterministic (derived from the image's
@@ -180,7 +181,7 @@ GitHub Actions:
 ```yaml
 services:
   near-sandbox:
-    image: nearprotocol/sandbox:2.13.1
+    image: nearprotocol/sandbox:2.13.4
     ports: ["3030:3030"]
 ```
 
@@ -215,6 +216,78 @@ payload = encode_signed_delegate(signed)          # base64, POST it to your rela
 # Relayer side:
 relayer.send_delegate(payload)
 ```
+
+nearcore 2.13's `DelegateV2` (NEP-611, the gas-key flavour of delegate
+actions) is deliberately not modeled while the feature is reworked upstream.
+
+## Global contracts
+
+Publish WASM once; any account then deploys it by reference instead of
+paying to store its own copy:
+
+```python
+from near import publish_contract, use_global_contract
+
+# Publisher: identified by your account (re-publish to update every user)
+# or by code hash (immutable).
+client.send_transaction(me, actions=[publish_contract(wasm_bytes)])
+client.send_transaction(me, actions=[publish_contract(wasm_bytes, identified_by="hash")])
+
+# Anyone: run the published code on their own account.
+client.send_transaction("app.alice.near",
+                        actions=[use_global_contract(account_id="publisher.near")])
+
+client.global_contract(account_id="publisher.near")   # ContractCode(code=..., hash=...)
+client.global_contract_exists(code_hash="5FzD...")
+client.contract_code("app.alice.near")                # the code an account runs
+```
+
+## Gas keys
+
+A gas key is an access key with its own prepaid balance for gas and several
+independent nonce lanes, so one key can keep many transactions in flight
+(nearcore 2.13):
+
+```python
+from near import add_gas_key, transfer_to_gas_key, withdraw_from_gas_key
+
+client.send_transaction(me, actions=[add_gas_key(gas_pk, num_nonces=8),
+                                     transfer_to_gas_key(gas_pk, "5 NEAR")])
+
+# Sign with the gas key and pick a lane; gas comes out of the key's balance,
+# deposits still come out of the account.
+as_gas_key = client.with_signer(KeyPairSigner(me, gas_key))
+as_gas_key.send_transaction("app.near", [function_call("ping")], gas_key_index=3)
+
+client.gas_key_nonces(me, gas_pk)                 # one nonce per lane
+client.access_key(me, gas_pk).gas_key_balance     # what is left for gas
+client.send_transaction(me, actions=[withdraw_from_gas_key(gas_pk, "1 NEAR")])
+```
+
+Any key can also ask for `strict_nonce=True`, which makes the node accept
+only "current nonce + 1" — for pipelines that must stay strictly sequential.
+Concurrent strict sends on one key (or lane) take turns inside the client,
+so all of them land; ordinary sends keep overlapping freely.
+
+## Deterministic accounts (NEP-616)
+
+An account whose ID is a function of its initial state — a global contract
+plus seed storage — so the address is known before it exists and anyone can
+bring it to life:
+
+```python
+from near import deterministic_state_init, derive_deterministic_account_id
+
+action = deterministic_state_init(account_id="publisher.near",
+                                  data={b"owner": b"alice.near"}, deposit="1 NEAR")
+account_id = derive_deterministic_account_id(action.state_init)   # "0s" + 40 hex chars
+client.send_transaction(account_id, actions=[action])
+```
+
+The seed map is encoded canonically (keys sorted bytewise, as nearcore's
+`BTreeMap`) and the node re-derives the ID, so a mismatch is rejected instead
+of creating a stray account. nearcore master's `UniversalStateInit`
+(unreleased) is not modeled yet.
 
 ## Message signing (NEP-413)
 
@@ -259,7 +332,8 @@ client = Near(network="mainnet", signer=KmsSigner())
 
 Borsh serialization via [pyborsh](https://github.com/r-near/pyborsh)
 (Pydantic-native, byte-verified against Rust), ed25519/ML-DSA via
-[pyca/cryptography](https://cryptography.io), HTTP via
+[pyca/cryptography](https://cryptography.io), NEP-616 Keccak-256 via
+[pycryptodome](https://www.pycryptodome.org), HTTP via
 [httpx](https://www.python-httpx.org). Every transaction byte this library
 produces is verified end-to-end against a real nearcore node in CI.
 

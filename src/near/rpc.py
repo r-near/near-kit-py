@@ -15,7 +15,9 @@ from typing import Any
 import httpx
 
 from .errors import (
+    AccessKeyNotFoundError,
     AccountNotFoundError,
+    ContractNotFoundError,
     InsufficientBalanceError,
     InvalidAccountIdError,
     InvalidNonceError,
@@ -56,37 +58,14 @@ def classify_rpc_error(error: dict[str, Any], status_code: int | None = None) ->
     message = error.get("message") or "RPC error"
     data = error.get("data")
 
-    if cause_name == "UNKNOWN_ACCOUNT":
-        return AccountNotFoundError(str(info.get("requested_account_id", "unknown")), data=error)
-    if cause_name == "INVALID_ACCOUNT":
-        return InvalidAccountIdError(str(info.get("requested_account_id", "unknown")), data=error)
+    if (not_found := _classify_query_error(cause_name, info, error)) is not None:
+        return not_found
 
     if cause_name == "INVALID_TRANSACTION" and isinstance(data, dict):
         tx_error = data.get("TxExecutionError") or data
         invalid_tx = tx_error.get("InvalidTxError") if isinstance(tx_error, dict) else None
-        if isinstance(invalid_tx, dict):
-            if isinstance(invalid_tx.get("InvalidNonce"), dict):
-                nonce_info = invalid_tx["InvalidNonce"]
-                return InvalidNonceError(
-                    f"Invalid nonce: tx nonce {nonce_info.get('tx_nonce')} vs "
-                    f"access key nonce {nonce_info.get('ak_nonce')}",
-                    ak_nonce=nonce_info.get("ak_nonce"),
-                    data=error,
-                )
-            if isinstance(invalid_tx.get("NotEnoughBalance"), dict):
-                balance_info = invalid_tx["NotEnoughBalance"]
-                required = balance_info.get("cost")
-                available = balance_info.get("balance")
-                return InsufficientBalanceError(
-                    f"Not enough balance: {balance_info.get('signer_id')} has "
-                    f"{Amount.yocto(int(available)) if available else '?'}, needs "
-                    f"{Amount.yocto(int(required)) if required else '?'}",
-                    required=int(required) if required else None,
-                    available=int(available) if available else None,
-                    data=error,
-                )
-            if "Expired" in invalid_tx:
-                return TransactionExpiredError(data=error)
+        if isinstance(invalid_tx, dict) and (typed := _classify_invalid_tx(invalid_tx, error)):
+            return typed
 
     retryable = cause_name in _RETRYABLE_CAUSES or (
         status_code is not None and (status_code in _RETRYABLE_STATUS or status_code >= 500)
@@ -94,6 +73,77 @@ def classify_rpc_error(error: dict[str, Any], status_code: int | None = None) ->
     rpc_error = RpcError(f"RPC error [{cause_name}]: {message}", retryable=retryable, data=error)
     rpc_error.code = cause_name
     return rpc_error
+
+
+def _classify_query_error(
+    cause_name: str, info: dict[str, Any], error: dict[str, Any]
+) -> NearError | None:
+    """The typed "does not exist" errors a ``query`` can return, or ``None``."""
+    if cause_name == "UNKNOWN_ACCOUNT":
+        return AccountNotFoundError(str(info.get("requested_account_id", "unknown")), data=error)
+    if cause_name == "INVALID_ACCOUNT":
+        return InvalidAccountIdError(str(info.get("requested_account_id", "unknown")), data=error)
+    if cause_name in ("UNKNOWN_ACCESS_KEY", "UNKNOWN_GAS_KEY"):
+        # The node names only the key here; clients re-raise with the account they asked about.
+        return AccessKeyNotFoundError(None, str(info.get("public_key", "unknown")), data=error)
+    if cause_name == "NO_CONTRACT_CODE":
+        return ContractNotFoundError(
+            f"account {info.get('contract_account_id', 'unknown')}", data=error
+        )
+    if cause_name == "NO_GLOBAL_CONTRACT_CODE":
+        return ContractNotFoundError(_global_contract_label(info.get("identifier")), data=error)
+    return None
+
+
+def _global_contract_label(identifier: Any) -> str:
+    """``{"hash": ...}`` / ``{"account_id": ...}`` (nearcore's JSON) as readable text."""
+    if isinstance(identifier, dict) and len(identifier) == 1:
+        kind, value = next(iter(identifier.items()))
+        return f"global contract {kind} {value}"
+    return f"global contract {identifier}"
+
+
+def _classify_invalid_tx(invalid_tx: dict[str, Any], error: dict[str, Any]) -> NearError | None:
+    """The typed ``InvalidTxError`` variants of a rejected ``send_tx``, or ``None``.
+
+    Anything else (``InvalidSignature``, ``InvalidNonceIndex``, ...) stays a
+    plain ``RpcError`` carrying the ``INVALID_TRANSACTION`` code.
+    """
+    if isinstance(invalid_tx.get("InvalidNonce"), dict):
+        nonce_info = invalid_tx["InvalidNonce"]
+        return InvalidNonceError(
+            f"Invalid nonce: tx nonce {nonce_info.get('tx_nonce')} vs "
+            f"access key nonce {nonce_info.get('ak_nonce')}",
+            ak_nonce=nonce_info.get("ak_nonce"),
+            data=error,
+        )
+    if isinstance(invalid_tx.get("NotEnoughBalance"), dict):
+        balance_info = invalid_tx["NotEnoughBalance"]
+        return _insufficient_balance(balance_info, str(balance_info.get("signer_id")), error)
+    if isinstance(invalid_tx.get("NotEnoughGasKeyBalance"), dict):
+        # The signing gas key's own prepaid balance could not cover the gas.
+        balance_info = invalid_tx["NotEnoughGasKeyBalance"]
+        return _insufficient_balance(
+            balance_info, f"the gas key of {balance_info.get('signer_id')}", error
+        )
+    if "Expired" in invalid_tx:
+        return TransactionExpiredError(data=error)
+    return None
+
+
+def _insufficient_balance(
+    balance_info: dict[str, Any], subject: str, error: dict[str, Any]
+) -> InsufficientBalanceError:
+    required = balance_info.get("cost")
+    available = balance_info.get("balance")
+    return InsufficientBalanceError(
+        f"Not enough balance: {subject} has "
+        f"{Amount.yocto(int(available)) if available else '?'}, needs "
+        f"{Amount.yocto(int(required)) if required else '?'}",
+        required=int(required) if required else None,
+        available=int(available) if available else None,
+        data=error,
+    )
 
 
 def raise_for_execution_failure(result: dict[str, Any]) -> None:

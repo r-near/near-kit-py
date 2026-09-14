@@ -92,6 +92,7 @@ class TestWithSigner:
             assert clone.signer is other
             assert clone._transport is near._transport
             assert clone._nonces is not near._nonces
+            assert clone._strict_locks is not near._strict_locks
             assert near.signer is signer  # original untouched
 
     async def test_async_clone_shares_pool_but_not_nonces(self, clean_env, signer):
@@ -101,6 +102,7 @@ class TestWithSigner:
             assert clone.signer is other
             assert clone._transport is near._transport
             assert clone._nonces is not near._nonces
+            assert clone._strict_locks is not near._strict_locks
 
 
 class TestOfflineSigning:
@@ -139,3 +141,27 @@ class TestOfflineSigning:
             assert signed.delegate_action.max_block_height == 99
             digest = delegate_action_signing_hash(signed.delegate_action)
             assert signer.public_key.verify(signed.signature.data, digest)
+
+
+class TestGasKeyIndexValidation:
+    """Bad lane indexes fail before any network round trip."""
+
+    def test_sync(self, clean_env, signer):
+        with Near("sandbox", signer=signer) as near:
+            with pytest.raises(ValueError, match=r"0\.\.=65535"):
+                near.send_transaction("bob.sandbox", [transfer("1 yocto")], gas_key_index=-1)
+            with pytest.raises(TypeError, match="gas_key_index"):
+                near.send_transaction("bob.sandbox", [transfer("1 yocto")], gas_key_index="2")  # type: ignore[arg-type]
+
+    async def test_async(self, clean_env, signer):
+        async with AsyncNear("sandbox", signer=signer) as near:
+            with pytest.raises(ValueError, match=r"0\.\.=65535"):
+                await near.send_transaction(
+                    "bob.sandbox", [transfer("1 yocto")], gas_key_index=70_000
+                )
+            with pytest.raises(TypeError, match="gas_key_index"):
+                await near.send_transaction(
+                    "bob.sandbox",
+                    [transfer("1 yocto")],
+                    gas_key_index=True,  # type: ignore[arg-type]
+                )

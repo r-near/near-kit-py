@@ -11,7 +11,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from near.errors import (
+    AccessKeyNotFoundError,
     AccountNotFoundError,
+    ContractNotFoundError,
     ContractPanicError,
     InsufficientBalanceError,
     InvalidAccountIdError,
@@ -115,6 +117,44 @@ class TestClassifyRpcError:
         assert err.available is None
         assert "?" in str(err)
 
+    def test_not_enough_gas_key_balance(self):
+        # nearcore 2.13: the signing gas key's own prepaid balance could not cover the gas.
+        error = _handler_error(
+            "INVALID_TRANSACTION",
+            data={
+                "TxExecutionError": {
+                    "InvalidTxError": {
+                        "NotEnoughGasKeyBalance": {
+                            "signer_id": "alice.near",
+                            "balance": "1",
+                            "cost": str(10**23),
+                        }
+                    }
+                }
+            },
+        )
+        err = classify_rpc_error(error)
+        assert isinstance(err, InsufficientBalanceError)
+        assert err.available == 1
+        assert err.required == 10**23
+        assert err.retryable is False
+        assert "gas key of alice.near" in str(err)
+        assert "needs 0.1 NEAR" in str(err)
+
+    def test_invalid_nonce_index_stays_a_plain_rpc_error(self):
+        error = _handler_error(
+            "INVALID_TRANSACTION",
+            data={
+                "TxExecutionError": {
+                    "InvalidTxError": {"InvalidNonceIndex": {"tx_nonce_index": 9, "num_nonces": 4}}
+                }
+            },
+        )
+        err = classify_rpc_error(error)
+        assert type(err) is RpcError
+        assert err.code == "INVALID_TRANSACTION"
+        assert err.retryable is False
+
     def test_expired_transaction(self):
         error = _handler_error(
             "INVALID_TRANSACTION",
@@ -181,6 +221,48 @@ class TestClassifyRpcError:
         assert isinstance(err, RpcError)
         assert err.code == "UNKNOWN"
         assert "RPC error" in str(err)
+
+
+class TestClassifyQueryNotFound:
+    """Typed "does not exist" causes of ``query``, as nearcore 2.13 returns them."""
+
+    @pytest.mark.parametrize("cause", ["UNKNOWN_GAS_KEY", "UNKNOWN_ACCESS_KEY"])
+    def test_missing_key_names_only_the_key(self, cause):
+        error = _handler_error(cause, info={"public_key": "ed25519:abc", "block_height": 1})
+        err = classify_rpc_error(error)
+        assert isinstance(err, AccessKeyNotFoundError)
+        assert err.public_key == "ed25519:abc"
+        assert err.account_id is None
+        assert str(err) == "Access key ed25519:abc not found"
+        assert err.data is error
+
+    def test_no_contract_code(self):
+        error = _handler_error("NO_CONTRACT_CODE", info={"contract_account_id": "plain.near"})
+        err = classify_rpc_error(error)
+        assert isinstance(err, ContractNotFoundError)
+        assert err.code == "CONTRACT_NOT_FOUND"
+        assert err.identifier == "account plain.near"
+        assert err.retryable is False
+
+    def test_no_global_contract_by_account(self):
+        error = _handler_error(
+            "NO_GLOBAL_CONTRACT_CODE", info={"identifier": {"account_id": "pub.near"}}
+        )
+        err = classify_rpc_error(error)
+        assert isinstance(err, ContractNotFoundError)
+        assert err.identifier == "global contract account_id pub.near"
+
+    def test_no_global_contract_by_hash(self):
+        error = _handler_error("NO_GLOBAL_CONTRACT_CODE", info={"identifier": {"hash": "5FzD"}})
+        err = classify_rpc_error(error)
+        assert isinstance(err, ContractNotFoundError)
+        assert err.identifier == "global contract hash 5FzD"
+
+    def test_no_global_contract_with_unexpected_identifier_shape(self):
+        error = _handler_error("NO_GLOBAL_CONTRACT_CODE", info={"identifier": "weird"})
+        err = classify_rpc_error(error)
+        assert isinstance(err, ContractNotFoundError)
+        assert err.identifier == "global contract weird"
 
 
 # ---------------------------------------------------------------------------

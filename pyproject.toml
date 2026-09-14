@@ -29,6 +29,7 @@ dependencies = [
     "pyborsh>=1.0",
     "httpx>=0.27",
     "cryptography>=48",
+    "pycryptodome>=3.20",
     "base58>=2.1",
     "mnemonic>=0.21",
 ]

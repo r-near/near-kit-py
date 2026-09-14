@@ -1,11 +1,42 @@
 import base64
 
-from near.models import AccessKeyView, ExecutionOutcome, KeyInfo, TransactionResult
-from near.units import Gas
+from near.models import (
+    AccessKeyView,
+    AccountView,
+    ContractCode,
+    ExecutionOutcome,
+    KeyInfo,
+    TransactionResult,
+)
+from near.units import Amount, Gas
 
 
 def _b64(raw: bytes) -> str:
     return base64.b64encode(raw).decode()
+
+
+PLAIN_ACCOUNT = {"amount": str(10**24), "locked": "0", "code_hash": "1" * 32, "storage_usage": 182}
+
+
+class TestAccountView:
+    def test_plain_account_runs_no_global_contract(self):
+        # nearcore omits both fields unless the account uses a global contract.
+        view = AccountView.model_validate(PLAIN_ACCOUNT)
+        assert view.amount == Amount("1 NEAR")
+        assert view.global_contract_hash is None
+        assert view.global_contract_account_id is None
+
+    def test_global_contract_by_account(self):
+        view = AccountView.model_validate(
+            {**PLAIN_ACCOUNT, "global_contract_account_id": "publisher.near"}
+        )
+        assert view.global_contract_account_id == "publisher.near"
+        assert view.global_contract_hash is None
+
+    def test_global_contract_by_hash(self):
+        view = AccountView.model_validate({**PLAIN_ACCOUNT, "global_contract_hash": "5FzD"})
+        assert view.global_contract_hash == "5FzD"
+        assert view.global_contract_account_id is None
 
 
 class TestAccessKeyView:
@@ -35,6 +66,57 @@ class TestAccessKeyView:
         )
         assert info.public_key == "ed25519:abc"
         assert info.access_key.is_full_access
+
+    def test_ordinary_keys_are_not_gas_keys(self):
+        full = AccessKeyView.model_validate({"nonce": 7, "permission": "FullAccess"})
+        assert not full.is_gas_key
+        assert full.gas_key_balance is None
+        fc = AccessKeyView.model_validate(
+            {"nonce": 0, "permission": {"FunctionCall": {"receiver_id": "a", "method_names": []}}}
+        )
+        assert not fc.is_gas_key
+        assert fc.gas_key_balance is None
+
+    def test_full_access_gas_key(self):
+        # GasKeyFullAccess may sign anything, exactly like FullAccess.
+        view = AccessKeyView.model_validate(
+            {
+                "nonce": 0,
+                "permission": {"GasKeyFullAccess": {"balance": str(2 * 10**24), "num_nonces": 4}},
+            }
+        )
+        assert view.is_gas_key
+        assert view.is_full_access
+        assert view.gas_key_balance == Amount("2 NEAR")
+
+    def test_function_call_gas_key(self):
+        view = AccessKeyView.model_validate(
+            {
+                "nonce": 0,
+                "permission": {
+                    "GasKeyFunctionCall": {
+                        "allowance": None,
+                        "balance": str(2 * 10**24),
+                        "method_names": ["m"],
+                        "num_nonces": 2,
+                        "receiver_id": "app.near",
+                    }
+                },
+            }
+        )
+        assert view.is_gas_key
+        assert not view.is_full_access
+        assert view.gas_key_balance == Amount("2 NEAR")
+
+
+class TestContractCode:
+    def test_decodes_code_base64(self):
+        code = ContractCode.model_validate({"code_base64": _b64(b"\x00asm"), "hash": "5FzD"})
+        assert code.code == b"\x00asm"
+        assert code.hash == "5FzD"
+
+    def test_raw_bytes_accepted(self):
+        assert ContractCode(code=b"raw", hash="h").code == b"raw"
 
 
 class TestExecutionOutcome:

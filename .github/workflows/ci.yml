@@ -43,7 +43,7 @@ jobs:
       # A real nearcore node is the integration-test oracle — run it like a
       # database service. Deterministic root key: near.testing.sandbox_signer().
       near-sandbox:
-        image: nearprotocol/sandbox:2.13.1
+        image: nearprotocol/sandbox:2.13.4
         ports:
           - 3030:3030
     steps:

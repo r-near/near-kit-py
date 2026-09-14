@@ -11,6 +11,7 @@ from typing import Any
 __all__ = [
     "AccessKeyNotFoundError",
     "AccountNotFoundError",
+    "ContractNotFoundError",
     "ContractPanicError",
     "InsufficientBalanceError",
     "InvalidAccountIdError",
@@ -64,14 +65,30 @@ class AccountNotFoundError(NearError):
 
 
 class AccessKeyNotFoundError(NearError):
-    """The access key does not exist for the account."""
+    """The access key (or gas key) does not exist for the account.
+
+    ``account_id`` is ``None`` when the node only named the key — nearcore's
+    ``UNKNOWN_GAS_KEY``/``UNKNOWN_ACCESS_KEY`` errors omit the account.
+    """
 
     code = "ACCESS_KEY_NOT_FOUND"
 
-    def __init__(self, account_id: str, public_key: str, *, data: Any = None) -> None:
-        super().__init__(f"Access key {public_key} not found for {account_id}", data=data)
+    def __init__(self, account_id: str | None, public_key: str, *, data: Any = None) -> None:
+        where = f" for {account_id}" if account_id else ""
+        super().__init__(f"Access key {public_key} not found{where}", data=data)
         self.account_id = account_id
         self.public_key = public_key
+
+
+class ContractNotFoundError(NearError):
+    """No contract code at the identifier: an account with no contract deployed,
+    or a global contract that was never published."""
+
+    code = "CONTRACT_NOT_FOUND"
+
+    def __init__(self, identifier: str, *, data: Any = None) -> None:
+        super().__init__(f"No contract code found for {identifier}", data=data)
+        self.identifier = identifier
 
 
 class ContractPanicError(NearError):

@@ -3,6 +3,7 @@ import pytest
 from near.errors import (
     AccessKeyNotFoundError,
     AccountNotFoundError,
+    ContractNotFoundError,
     ContractPanicError,
     InsufficientBalanceError,
     InvalidAccountIdError,
@@ -53,6 +54,18 @@ class TestErrorAttributes:
         assert err.public_key == "ed25519:abc"
         assert "ed25519:abc" in str(err)
 
+    def test_access_key_not_found_without_account(self):
+        err = AccessKeyNotFoundError(None, "ed25519:abc")
+        assert err.account_id is None
+        assert str(err) == "Access key ed25519:abc not found"
+
+    def test_contract_not_found(self):
+        err = ContractNotFoundError("global contract hash 5FzD", data={"x": 1})
+        assert err.code == "CONTRACT_NOT_FOUND"
+        assert err.identifier == "global contract hash 5FzD"
+        assert "5FzD" in str(err)
+        assert err.data == {"x": 1}
+
     def test_contract_panic(self):
         err = ContractPanicError("assertion failed", logs=["log1"], receipt_id="r1")
         assert err.code == "CONTRACT_PANIC"
@@ -95,6 +108,7 @@ class TestErrorHierarchy:
             RpcError("x"),
             AccountNotFoundError("a.near"),
             AccessKeyNotFoundError("a.near", "ed25519:k"),
+            ContractNotFoundError("account a.near"),
             ContractPanicError("p"),
             InvalidNonceError("n"),
             InsufficientBalanceError("b"),

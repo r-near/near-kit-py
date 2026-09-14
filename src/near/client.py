@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import base64 as b64
+import threading
 from collections.abc import Sequence
+from contextlib import nullcontext
 from typing import Any, Self, cast
 
 from . import _core
 from .delegate import decode_signed_delegate, sign_delegate_action
-from .errors import AccessKeyNotFoundError, AccountNotFoundError, InvalidNonceError, RpcError
+from .errors import (
+    AccessKeyNotFoundError,
+    AccountNotFoundError,
+    ContractNotFoundError,
+    InvalidNonceError,
+    RpcError,
+)
 from .keys import PublicKey, Signer
-from .models import AccessKeyView, AccountView, KeyInfo, TransactionResult
+from .models import AccessKeyView, AccountView, ContractCode, KeyInfo, TransactionResult
 from .nep413 import SignedMessage, sign_message as _nep413_sign
 from .rpc import RpcTransport, raise_for_execution_failure
 from .tokens import (
@@ -23,7 +31,14 @@ from .tokens import (
     storage_deposit_action,
 )
 from .units import DEFAULT_GAS, ZERO, Amount, Gas
-from .wire import Action, AnyAction, DelegateAction, NonDelegateAction, sign_transaction
+from .wire import (
+    Action,
+    AnyAction,
+    DelegateAction,
+    NonDelegateAction,
+    sign_transaction,
+    to_wire_public_key,
+)
 
 __all__ = ["Near"]
 
@@ -63,6 +78,7 @@ class Near:
         )
         self._transport = RpcTransport(self.rpc_url, timeout=timeout, retries=retries)
         self._nonces = _core.NonceCache()
+        self._strict_locks: dict[str, threading.Lock] = {}
         self._ft_meta: dict[str, FTMetadata] = {}
         self._nft_meta: dict[str, dict[str, Any]] = {}
 
@@ -87,6 +103,7 @@ class Near:
         clone.__dict__.update(self.__dict__)
         clone.signer = signer
         clone._nonces = _core.NonceCache()  # noqa: SLF001
+        clone._strict_locks = {}  # noqa: SLF001
         return clone
 
     # ------------------------------------------------------------------
@@ -137,6 +154,54 @@ class Near:
         """One access key's nonce and permission."""
         result = self._fetch_access_key(account_id, str(public_key))
         return AccessKeyView.model_validate(result)
+
+    def gas_key_nonces(
+        self, account_id: str, public_key: str | PublicKey, *, block: int | str | None = None
+    ) -> list[int]:
+        """The current nonce of each lane of a gas key (index = ``gas_key_index``).
+
+        ``block`` is a height, hash or finality as in :meth:`view`; the
+        default is the optimistic head, like every other read.
+        """
+        return self._fetch_gas_key_nonces(account_id, str(public_key), block)
+
+    def contract_code(
+        self, account_id: str | None = None, *, block: int | str | None = None
+    ) -> ContractCode:
+        """The WASM deployed on the account (defaults to the signer's account)."""
+        target = _core.default_account_id(self.signer, account_id)
+        result = self._transport.call("query", _core.contract_code_params(target, block))
+        return ContractCode.model_validate(result)
+
+    def global_contract(
+        self,
+        *,
+        code_hash: str | bytes | None = None,
+        account_id: str | None = None,
+        block: int | str | None = None,
+    ) -> ContractCode:
+        """A published global contract's WASM, by code hash or by publisher account.
+
+        Reads the optimistic head by default (``block`` as in :meth:`view`),
+        so a fresh publish is visible without waiting for finality.
+        """
+        params = _core.global_contract_params(
+            code_hash=code_hash, account_id=account_id, block=block
+        )
+        return ContractCode.model_validate(self._transport.call("query", params))
+
+    def global_contract_exists(
+        self,
+        *,
+        code_hash: str | bytes | None = None,
+        account_id: str | None = None,
+        block: int | str | None = None,
+    ) -> bool:
+        try:
+            self.global_contract(code_hash=code_hash, account_id=account_id, block=block)
+        except ContractNotFoundError:
+            return False
+        return True
 
     def transaction_status(
         self,
@@ -200,37 +265,74 @@ class Near:
         *,
         wait_until: str = _core.DEFAULT_WAIT,
         signer: Signer | None = None,
+        gas_key_index: int | None = None,
+        strict_nonce: bool = False,
     ) -> TransactionResult:
-        """Sign and send a (possibly multi-action) transaction atomically."""
-        active = _core.require_signer(signer or self.signer)
-        key = _core.NonceCache.key(active)
-        last_error: Exception | None = None
+        """Sign and send a (possibly multi-action) transaction atomically.
 
-        for attempt in range(3):
-            on_chain_nonce = None
-            if attempt or not self._nonces.has(key):
-                ak = self._fetch_access_key(active.account_id, str(active.public_key))
-                on_chain_nonce = int(ak["nonce"])
-            nonce = self._nonces.reserve(key, on_chain_nonce)
-            block_hash = _core.block_hash_of(self._transport.call("block", {"finality": "final"}))
-            tx = _core.build_transaction(active, receiver_id, list(actions), nonce, block_hash)
-            _, signed_raw = sign_transaction(tx, active)
-            try:
-                result = self._transport.call(
-                    "send_tx",
-                    {
-                        "signed_tx_base64": b64.b64encode(signed_raw).decode(),
-                        "wait_until": wait_until,
-                    },
+        ``gas_key_index`` signs with the signer's gas key on that nonce lane
+        (gas is then paid from the key's balance); ``strict_nonce`` demands
+        the nonce be exactly the current one plus one instead of merely
+        larger — concurrent strict sends on one key (or lane) therefore run
+        one at a time, where monotonic sends overlap freely. Either selects
+        the V1 wire format — the default stays the classic V0 bytes.
+        """
+        active = _core.require_signer(signer or self.signer)
+        lane = _core.validate_gas_key_index(gas_key_index)
+        key = _core.NonceCache.key(active, lane)
+        last_error: Exception | None = None
+        strict_base: int | None = None  # the node-reported nonce after a strict-mode miss
+
+        # Overlapping strict sends on one key (or gas-key lane) would each fetch the
+        # same nonce and collide, so they take turns: the key's lock is held from the
+        # fetch through the send and any nonce retry. Monotonic sends stay lock-free
+        # (the cache reserves a distinct nonce for each).
+        guard = self._strict_lock(key) if strict_nonce else nullcontext()
+        with guard:
+            for attempt in range(3):
+                if strict_nonce:
+                    # Strict wants exactly current + 1, so the monotonic cache (which
+                    # may run ahead of the chain) is bypassed for the freshest view.
+                    if strict_base is None:
+                        strict_base = self._fetch_nonce(active, lane, "optimistic")
+                    nonce = strict_base + 1
+                else:
+                    on_chain_nonce = None
+                    if attempt or not self._nonces.has(key):
+                        on_chain_nonce = self._fetch_nonce(active, lane, "final")
+                    nonce = self._nonces.reserve(key, on_chain_nonce)
+                block = self._transport.call("block", {"finality": "final"})
+                block_hash = _core.block_hash_of(block)
+                tx = _core.build_transaction(
+                    active,
+                    receiver_id,
+                    list(actions),
+                    nonce,
+                    block_hash,
+                    gas_key_index=lane,
+                    strict_nonce=strict_nonce,
                 )
-            except InvalidNonceError as exc:
-                last_error = exc
-                if exc.ak_nonce is not None:
-                    self._nonces.sync_to(key, exc.ak_nonce)
-                continue
-            if wait_until != "NONE":
-                raise_for_execution_failure(result)
-            return TransactionResult.model_validate(result)
+                _, signed_raw = sign_transaction(tx, active)
+                try:
+                    result = self._transport.call(
+                        "send_tx",
+                        {
+                            "signed_tx_base64": b64.b64encode(signed_raw).decode(),
+                            "wait_until": wait_until,
+                        },
+                    )
+                except InvalidNonceError as exc:
+                    last_error = exc
+                    if exc.ak_nonce is not None:
+                        self._nonces.sync_to(key, exc.ak_nonce)
+                    # Strict mode resumes from the node-reported nonce, or re-fetches
+                    # when the node gave none — resending the same nonce cannot help.
+                    strict_base = exc.ak_nonce
+                    continue
+                self._nonces.sync_to(key, nonce)
+                if wait_until != "NONE":
+                    raise_for_execution_failure(result)
+                return TransactionResult.model_validate(result)
 
         raise last_error  # type: ignore[misc]
 
@@ -385,18 +487,16 @@ class Near:
         """Sign a NEP-366 delegate action for a relayer to submit (user side)."""
         active = _core.require_signer(signer or self.signer)
         if nonce is None:
-            ak = self._fetch_access_key(active.account_id, str(active.public_key))
-            nonce = int(ak["nonce"]) + 1
+            nonce = self._fetch_nonce(active, None, "final") + 1
         if max_block_height is None:
-            block = self._transport.call("block", {"finality": "final"})
-            max_block_height = int(block["header"]["height"]) + ttl_blocks
+            max_block_height = self._final_height() + ttl_blocks
         delegate = DelegateAction(
             sender_id=active.account_id,
             receiver_id=receiver_id,
             actions=list(actions),
             nonce=nonce,
             max_block_height=max_block_height,
-            public_key=_wire_pk(active),
+            public_key=to_wire_public_key(active.public_key),
         )
         return sign_delegate_action(delegate, active)
 
@@ -432,16 +532,50 @@ class Near:
 
     # ------------------------------------------------------------------
 
-    def _fetch_access_key(self, account_id: str, public_key: str) -> dict[str, Any]:
-        result = self._transport.call("query", _core.access_key_params(account_id, public_key))
+    def _fetch_access_key(
+        self, account_id: str, public_key: str, finality: str = "final"
+    ) -> dict[str, Any]:
+        try:
+            result = self._transport.call(
+                "query", _core.access_key_params(account_id, public_key, finality)
+            )
+        except AccessKeyNotFoundError as exc:
+            # A structured UNKNOWN_ACCESS_KEY names only the key; restore the account asked about.
+            raise AccessKeyNotFoundError(account_id, public_key, data=exc.data) from None
         if isinstance(result, dict) and (error := result.get("error")):
+            # nearcore 2.13 instead reports a missing key inside a successful result.
             if "does not exist" in str(error):
                 raise AccessKeyNotFoundError(account_id, public_key, data=result)
             raise RpcError(f"Query error: {error}", data=result)
         return cast("dict[str, Any]", result)
 
+    def _fetch_gas_key_nonces(
+        self, account_id: str, public_key: str, block: int | str | None
+    ) -> list[int]:
+        try:
+            result = self._transport.call(
+                "query", _core.gas_key_nonces_params(account_id, public_key, block)
+            )
+        except AccessKeyNotFoundError as exc:
+            # nearcore's UNKNOWN_GAS_KEY names only the key; restore the account asked about.
+            raise AccessKeyNotFoundError(account_id, public_key, data=exc.data) from None
+        return _core.nonces_from_result(result)
 
-def _wire_pk(signer: Signer) -> Any:
-    from .wire import to_wire_public_key
+    def _fetch_nonce(self, signer: Signer, gas_key_index: int | None, finality: str) -> int:
+        """The signer key's current on-chain nonce (of one lane, for a gas key)."""
+        account_id, public_key = signer.account_id, str(signer.public_key)
+        if gas_key_index is None:
+            return int(self._fetch_access_key(account_id, public_key, finality)["nonce"])
+        nonces = self._fetch_gas_key_nonces(account_id, public_key, finality)
+        return _core.lane_nonce(nonces, gas_key_index, account_id, public_key)
 
-    return to_wire_public_key(signer.public_key)
+    def _strict_lock(self, key: str) -> threading.Lock:
+        """The lock serializing strict-nonce sends on one key/lane (made on first use)."""
+        lock = self._strict_locks.get(key)
+        if lock is None:  # setdefault is atomic, so racing threads still share one lock
+            lock = self._strict_locks.setdefault(key, threading.Lock())
+        return lock
+
+    def _final_height(self) -> int:
+        block = self._transport.call("block", {"finality": "final"})
+        return int(block["header"]["height"])

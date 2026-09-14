@@ -10,12 +10,7 @@ from __future__ import annotations
 import base64 as b64
 
 from .keys import Signer
-from .wire import (
-    Action,
-    DelegateAction,
-    delegate_action_signing_hash,
-    to_wire_signature,
-)
+from .wire import Action, DelegateAction, delegate_action_signing_hash, to_wire_signature
 
 __all__ = ["decode_signed_delegate", "encode_signed_delegate", "sign_delegate_action"]
 
