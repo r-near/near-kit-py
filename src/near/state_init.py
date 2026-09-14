@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import re
 
-from ._keccak import keccak256
+from Crypto.Hash import keccak
+
 from .wire import DeterministicAccountStateInit
 
 __all__ = ["derive_deterministic_account_id", "is_deterministic_account_id"]
@@ -20,9 +21,18 @@ __all__ = ["derive_deterministic_account_id", "is_deterministic_account_id"]
 _DETERMINISTIC_ID_RE = re.compile(r"^0s[0-9a-f]{40}$")
 
 
+def _keccak256(data: bytes) -> bytes:
+    """Keccak-256 as Ethereum and NEP-616 define it: the original ``0x01`` padding.
+
+    ``hashlib.sha3_256`` runs the same permutation with FIPS-202 padding and
+    so produces different digests; pycryptodome's ``keccak`` is the original.
+    """
+    return keccak.new(digest_bits=256, data=data).digest()
+
+
 def derive_deterministic_account_id(state_init: DeterministicAccountStateInit) -> str:
     """The account ID that ``state_init`` creates (the receiver for the action)."""
-    digest = keccak256(state_init.to_borsh())
+    digest = _keccak256(state_init.to_borsh())
     return "0s" + digest[12:32].hex()
 
 

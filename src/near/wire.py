@@ -7,11 +7,10 @@ action/mod.rs, action/delegate.rs}``, ``core/primitives-core/src/{account.rs,
 global_contract.rs, deterministic_account_id.rs}`` and near-kit-ts
 ``src/core/schema.ts``.
 
-Single-variant versioned enums (``DeterministicAccountStateInit``,
-``VersionedDelegateActionPayload``) and the ``Transaction::V1`` tag are
-modeled with an explicit leading ``u8`` field pinned by a ``Literal``: a
-one-member union gives pyborsh no discriminant to write, and the byte is
-identical either way.
+The single-variant versioned enum ``DeterministicAccountStateInit`` and the
+``Transaction::V1`` tag are modeled with an explicit leading ``u8`` field
+pinned by a ``Literal``: a one-member union gives pyborsh no discriminant to
+write, and the byte is identical either way.
 """
 
 from __future__ import annotations
@@ -34,7 +33,6 @@ if TYPE_CHECKING:
 # NEP-461 domain tags: prepended (as borsh u32) before hashing so signatures
 # over these payloads can never collide with transaction signatures.
 NEP366_DELEGATE_PREFIX = (1 << 30) + 366  # meta-transactions
-NEP611_DELEGATE_V2_PREFIX = (1 << 30) + 611  # gas-key meta-transactions (DelegateV2)
 NEP413_MESSAGE_TAG = (1 << 31) + 413  # off-chain message signing
 
 # A gas key may allocate at most this many parallel nonce lanes (nearcore
@@ -187,6 +185,11 @@ class DeterministicAccountStateInit(Borsh, BaseModel):
     exactly the same bytes as a borsh map. Mappings are accepted on input.
     """
 
+    # Tag-field trick: pyborsh resolves an Annotated field's Borsh marker before
+    # it infers anything from the base type, so the U8 wins and this is written
+    # and read as one raw byte — a bare Literal field would never be serialized
+    # at all. Verified on pyborsh 1.0.1 and 1.1.0; the near-kit-ts V1 golden
+    # vector in tests/unit/test_wire_parity.py guards it.
     version: Annotated[Literal[0], U8] = 0
     code: AnyGlobalContractIdentifier
     data: list[tuple[bytes, bytes]] = []
@@ -239,7 +242,7 @@ AnyNonceMode = NonceMode.Monotonic | NonceMode.Strict
 
 
 class Action(BorshEnum):
-    """The NEAR Action enum. Declaration order = protocol discriminants 0..14."""
+    """The NEAR Action enum. Declaration order = protocol discriminants 0..13."""
 
     class CreateAccount(Borsh, BaseModel):
         variant: Literal["CreateAccount"] = "CreateAccount"
@@ -306,12 +309,11 @@ class Action(BorshEnum):
         public_key: AnyPublicKey
         amount: Annotated[int, U128]
 
-    class DelegateV2(Borsh, BaseModel):
-        """nearcore's ``VersionedSignedDelegateAction``, carried by ``Action::DelegateV2``."""
-
-        variant: Literal["DelegateV2"] = "DelegateV2"
-        delegate_action: VersionedDelegateActionPayload
-        signature: AnySignature
+    # Slot 14 (DelegateV2, NEP-611) is intentionally unmodeled while nearcore
+    # reworks the feature, and slot 15 (UniversalStateInit) is unreleased.
+    # Because 14 was the trailing variant, leaving it out changes no bytes for
+    # 0..13 — but whoever adds 15 later must first reserve 14 with a
+    # placeholder variant so the discriminants stay aligned.
 
 
 AnyAction = (
@@ -329,12 +331,11 @@ AnyAction = (
     | Action.DeterministicStateInit
     | Action.TransferToGasKey
     | Action.WithdrawFromGasKey
-    | Action.DelegateV2
 )
 
 # Actions permitted inside a delegate action (nearcore's NonDelegateAction):
-# every Action except the two delegate variants (8 and 14), so nesting is
-# impossible. A subset union keeps the parent's discriminants.
+# every Action except SignedDelegate itself (8), so nesting is impossible. A
+# subset union keeps the parent's discriminants.
 NonDelegateAction = (
     Action.CreateAccount
     | Action.DeployContract
@@ -351,8 +352,6 @@ NonDelegateAction = (
     | Action.WithdrawFromGasKey
 )
 
-AnySignedDelegate = Action.SignedDelegate | Action.DelegateV2
-
 
 class DelegateAction(Borsh, BaseModel):
     """NEP-366 delegate action: intent signed by a user, relayed by someone else."""
@@ -365,31 +364,7 @@ class DelegateAction(Borsh, BaseModel):
     public_key: AnyPublicKey
 
 
-class DelegateActionV2(Borsh, BaseModel):
-    """NEP-611 delegate action: like V1, but the nonce may address a gas-key lane."""
-
-    sender_id: str
-    receiver_id: str
-    actions: list[NonDelegateAction]
-    nonce: AnyTransactionNonce
-    max_block_height: Annotated[int, U64]
-    public_key: AnyPublicKey
-
-
-class VersionedDelegateActionPayload(Borsh, BaseModel):
-    """nearcore's ``VersionedDelegateActionPayload`` enum, whose only variant is V2 (tag 0).
-
-    The tag is part of the NEP-611 signed bytes, so it is modeled explicitly.
-    """
-
-    version: Annotated[Literal[0], U8] = 0
-    v2: DelegateActionV2
-
-
-VersionedSignedDelegateAction = Action.DelegateV2
-
 Action.SignedDelegate.model_rebuild()
-Action.DelegateV2.model_rebuild()
 
 
 # ---------------------------------------------------------------------------
@@ -421,7 +396,7 @@ class TransactionV1(Borsh, BaseModel):
     ``to_borsh()`` is the exact signing payload.
     """
 
-    version: Annotated[Literal[1], U8] = 1
+    version: Annotated[Literal[1], U8] = 1  # tag-field trick: see DeterministicAccountStateInit
     signer_id: str
     public_key: AnyPublicKey
     nonce: AnyTransactionNonce
@@ -528,14 +503,3 @@ def delegate_action_signing_hash(delegate: DelegateAction) -> bytes:
     """
     prefix = NEP366_DELEGATE_PREFIX.to_bytes(4, "little")
     return hashlib.sha256(prefix + delegate.to_borsh()).digest()
-
-
-def delegate_action_v2_signing_hash(payload: VersionedDelegateActionPayload) -> bytes:
-    """The SHA-256 hash a NEP-611 (DelegateV2) signature is made over.
-
-    The domain prefix is 2^30 + 611 — distinct from V1, so a V1 signature can
-    never validate a V2 action — and the signed bytes are the *versioned*
-    payload, i.e. the ``0x00`` V2 tag is included.
-    """
-    prefix = NEP611_DELEGATE_V2_PREFIX.to_bytes(4, "little")
-    return hashlib.sha256(prefix + payload.to_borsh()).digest()

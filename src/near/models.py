@@ -37,6 +37,9 @@ class AccountView(_Model):
     storage_usage: int
     block_height: int | None = None
     block_hash: str | None = None
+    # Which global contract the account runs, if any (nearcore omits both otherwise).
+    global_contract_hash: str | None = None
+    global_contract_account_id: str | None = None
 
 
 class AccessKeyView(_Model):
@@ -47,7 +50,10 @@ class AccessKeyView(_Model):
 
     @property
     def is_full_access(self) -> bool:
-        return self.permission == "FullAccess"
+        """Whether the key may sign any action: ``FullAccess`` or a full-access gas key."""
+        return self.permission == "FullAccess" or (
+            isinstance(self.permission, dict) and "GasKeyFullAccess" in self.permission
+        )
 
     @property
     def is_gas_key(self) -> bool:

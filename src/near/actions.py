@@ -149,7 +149,6 @@ def add_gas_key(
     *,
     contract_id: str | None = None,
     method_names: Sequence[str] = (),
-    allowance: str | Amount | None = None,
 ) -> Action.AddKey:
     """Add a gas key: an access key whose own prepaid balance pays for gas.
 
@@ -158,19 +157,13 @@ def add_gas_key(
     ``send_transaction(..., gas_key_index=n)``. It is added with an empty
     balance; fund it with :func:`transfer_to_gas_key`. ``contract_id``
     restricts it to function calls on that contract like
-    :func:`add_function_call_key`; the protocol forbids an allowance on gas
-    keys (the key balance plays that role), so ``allowance`` must stay
-    ``None``.
+    :func:`add_function_call_key`, minus the allowance: the protocol forbids
+    one on gas keys, whose prepaid balance plays that role.
     """
     if isinstance(num_nonces, bool) or not isinstance(num_nonces, int):
         raise TypeError(f"num_nonces must be an int, got {type(num_nonces).__name__}")
     if not 1 <= num_nonces <= MAX_GAS_KEY_NONCES:
         raise ValueError(f"num_nonces must be in 1..={MAX_GAS_KEY_NONCES}, got {num_nonces}")
-    if allowance is not None:
-        raise ValueError(
-            "Gas keys cannot carry an allowance (the protocol rejects it); "
-            "their prepaid balance limits gas spending instead"
-        )
     info = GasKeyInfo(balance=0, num_nonces=num_nonces)
     permission: AccessKeyPermission.GasKeyFullAccess | AccessKeyPermission.GasKeyFunctionCall
     if contract_id is None:

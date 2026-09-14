@@ -1,6 +1,5 @@
 """nearcore 2.13 action parity against a real sandbox: global contracts,
-NEP-616 deterministic accounts, gas keys (V1 transactions, strict nonces) and
-DelegateV2 meta-transactions.
+NEP-616 deterministic accounts and gas keys (V1 transactions, strict nonces).
 
 The node is the oracle: a wrong discriminant, an unsorted state-init map or a
 mis-hashed V1 transaction would be rejected outright, so every passing test
@@ -18,6 +17,7 @@ from near import (
     Amount,
     AsyncNear,
     ContractNotFoundError,
+    InsufficientBalanceError,
     Near,
     RpcError,
     add_full_access_key,
@@ -34,9 +34,7 @@ from near import (
     use_global_contract,
     withdraw_from_gas_key,
 )
-from near.delegate import encode_signed_delegate
 from near.keys import KeyPairSigner
-from near.wire import TransactionNonce
 
 pytestmark = pytest.mark.integration
 
@@ -115,6 +113,7 @@ class TestGlobalContracts:
         assert any(m["text"] == "global" for m in near.view(user.account_id, "get_messages"))
         # The account runs the published code even though it stores none itself.
         assert near.contract_code(user.account_id).code == guestbook_wasm
+        assert near.contract_code(user.account_id, block="final").code == guestbook_wasm
 
     def test_publish_and_use_by_hash(self, near, publisher, code_hash, unique_id, guestbook_wasm):
         published = near.global_contract(code_hash=code_hash)
@@ -141,6 +140,10 @@ class TestGlobalContracts:
         assert near.global_contract_exists(code_hash=code_hash)
         assert not near.global_contract_exists(account_id="nobody.sandbox")
         assert not near.global_contract_exists(code_hash=bytes(32))
+        # block= works like view(): a finality or a concrete height.
+        assert near.global_contract_exists(account_id=publisher.account_id, block="final")
+        height = near.rpc("block", {"finality": "final"})["header"]["height"]
+        assert near.global_contract(code_hash=code_hash, block=height).hash == code_hash
         with pytest.raises(ContractNotFoundError) as exc_info:
             near.global_contract(account_id="nobody.sandbox")
         assert exc_info.value.code == "CONTRACT_NOT_FOUND"
@@ -216,7 +219,7 @@ class TestGasKeys:
         )
         view = near.access_key(owner.account_id, gas_key.public_key)
         assert view.is_gas_key
-        assert not view.is_full_access
+        assert view.is_full_access  # GasKeyFullAccess is unrestricted, like FullAccess
         assert view.gas_key_balance == Amount("0 NEAR")
 
         as_owner.send_transaction(
@@ -229,6 +232,7 @@ class TestGasKeys:
         )
         lanes = near.gas_key_nonces(owner.account_id, gas_key.public_key)
         assert len(lanes) == 4
+        assert near.gas_key_nonces(owner.account_id, gas_key.public_key, block="final") == lanes
 
         recipient = _funded(near, f"{unique_id}r", "1 NEAR")
         as_gas = near.with_signer(KeyPairSigner(owner.account_id, gas_key))
@@ -267,6 +271,28 @@ class TestGasKeys:
         key_after = near.access_key(owner.account_id, gas_key.public_key).gas_key_balance
         assert key_before - key_after == Amount("0.5 NEAR")
 
+        # Reads default to the optimistic head, so a send that is executed but
+        # not yet final is already visible to the next read.
+        as_gas.send_transaction(recipient.account_id, [transfer("0.1 NEAR")], gas_key_index=3)
+        assert near.gas_key_nonces(owner.account_id, gas_key.public_key)[3] == lanes[3] + 1
+
+    def test_underfunded_gas_key_is_a_typed_error(self, near, unique_id):
+        owner = _funded(near, unique_id)
+        gas_key = generate_key()
+        near.with_signer(owner).send_transaction(
+            owner.account_id,
+            [
+                add_gas_key(gas_key.public_key, 1),
+                transfer_to_gas_key(gas_key.public_key, "1 yocto"),
+            ],
+            wait_until="FINAL",
+        )
+        as_gas = near.with_signer(KeyPairSigner(owner.account_id, gas_key))
+        with pytest.raises(InsufficientBalanceError, match="gas key of") as exc_info:
+            as_gas.send_transaction("sandbox", [transfer("1 yocto")], gas_key_index=0)
+        assert exc_info.value.available == 1
+        assert exc_info.value.required > 1
+
     def test_gas_key_needs_a_lane(self, near, unique_id):
         _, as_gas = _gas_key_owner(near, unique_id)
         # A gas key cannot sign the classic V0 transaction: the node wants a lane.
@@ -291,6 +317,7 @@ class TestGasKeys:
             ],
             wait_until="FINAL",
         )
+        assert not near.access_key(owner.account_id, gas_key.public_key).is_full_access
         as_gas = near.with_signer(KeyPairSigner(owner.account_id, gas_key))
         as_gas.send_transaction(
             guestbook,
@@ -311,15 +338,18 @@ class TestGasKeys:
     def test_strict_nonce_round_trip(self, near, unique_id):
         owner = _funded(near, unique_id)
         as_owner = near.with_signer(owner)
-        hashes = [
+        strict = [
             as_owner.send_transaction(
                 "sandbox", [transfer("1 yocto")], strict_nonce=True, wait_until="FINAL"
-            ).transaction_hash
+            )
             for _ in range(2)
         ]
+        # The node recorded strict mode (its view omits nonce_mode when monotonic).
+        assert [r.transaction["nonce_mode"] for r in strict] == ["strict", "strict"]
         # Back to monotonic mode on the same key: the cache is in step with the chain.
-        hashes.append(as_owner.send("sandbox", "1 yocto", wait_until="FINAL").transaction_hash)
-        assert len(set(hashes)) == 3
+        monotonic = as_owner.send("sandbox", "1 yocto", wait_until="FINAL")
+        assert "nonce_mode" not in monotonic.transaction
+        assert len({r.transaction_hash for r in [*strict, monotonic]}) == 3
 
         gas_signer, as_gas = _gas_key_owner(near, f"{unique_id}g")
         lanes = near.gas_key_nonces(gas_signer.account_id, gas_signer.public_key)
@@ -335,37 +365,8 @@ class TestGasKeys:
         assert after[1] == lanes[1] + 2
 
 
-class TestDelegateV2:
-    def test_relay_with_gas_key(self, near, unique_id):
-        gas_signer, as_gas = _gas_key_owner(near, f"{unique_id}u")
-        recipient = _funded(near, f"{unique_id}r", "1 NEAR")
-        lanes = near.gas_key_nonces(gas_signer.account_id, gas_signer.public_key)
-
-        signed = as_gas.sign_delegate_v2(
-            recipient.account_id, [transfer("1 NEAR")], gas_key_index=3
-        )
-        assert signed.delegate_action.v2.nonce == TransactionNonce.GasKeyNonce(
-            nonce=lanes[3] + 1, nonce_index=3
-        )
-        payload = encode_signed_delegate(signed)  # what the user would POST to a relayer
-
-        result = near.send_delegate(payload, wait_until="FINAL")
-        assert result.transaction_hash
-        assert near.balance(recipient.account_id) == Amount("2 NEAR")
-        assert near.gas_key_nonces(gas_signer.account_id, gas_signer.public_key)[3] == lanes[3] + 1
-
-    def test_relay_with_regular_key(self, near, unique_id):
-        user = _funded(near, f"{unique_id}u")
-        recipient = _funded(near, f"{unique_id}r", "1 NEAR")
-        signed = near.with_signer(user).sign_delegate_v2(recipient.account_id, [transfer("1 NEAR")])
-        assert isinstance(signed.delegate_action.v2.nonce, TransactionNonce.Nonce)
-        result = near.send_delegate(signed, wait_until="FINAL")  # the model, not base64
-        assert result.transaction_hash
-        assert near.balance(recipient.account_id) == Amount("2 NEAR")
-
-
 class TestAsyncSurface:
-    async def test_gas_key_send_and_delegate_v2(self, anear, unique_id, sandbox_url):
+    async def test_gas_key_send(self, anear, unique_id, sandbox_url):
         owner_id = f"{unique_id}ao.sandbox"
         owner_key, gas_key = generate_key(), generate_key()
         await anear.send_transaction(
@@ -392,13 +393,10 @@ class TestAsyncSurface:
             "sandbox", [transfer("1 yocto")], gas_key_index=1, strict_nonce=True, wait_until="FINAL"
         )
         assert result.transaction["nonce_index"] == 1
-
-        signed = await as_gas.sign_delegate_v2("sandbox", [transfer("1 yocto")], gas_key_index=2)
-        result = await anear.send_delegate(encode_signed_delegate(signed), wait_until="FINAL")
-        assert result.transaction_hash
-        after = await anear.gas_key_nonces(owner_id, gas_key.public_key)
+        assert result.transaction["nonce_mode"] == "strict"
+        after = await anear.gas_key_nonces(owner_id, gas_key.public_key, block="final")
         assert after[1] == lanes[1] + 1
-        assert after[2] == lanes[2] + 1
+        assert after[2] == lanes[2]
 
         assert not await anear.global_contract_exists(account_id=owner_id)
         with pytest.raises(ContractNotFoundError):
@@ -416,6 +414,7 @@ class TestAsyncSurface:
             ).code == guestbook_wasm
             assert (await anear.global_contract(code_hash=code_hash)).hash == code_hash
             assert await anear.global_contract_exists(code_hash=code_hash)
+            assert await anear.global_contract_exists(code_hash=code_hash, block="final")
             assert not await anear.global_contract_exists(code_hash=bytes(32))
             # A locally deployed contract reads back the same way.
             assert (await anear.contract_code(guestbook)).code == guestbook_wasm

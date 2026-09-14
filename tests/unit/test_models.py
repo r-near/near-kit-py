@@ -1,13 +1,42 @@
 import base64
 
-import pytest
-
-from near.models import AccessKeyView, ContractCode, ExecutionOutcome, KeyInfo, TransactionResult
+from near.models import (
+    AccessKeyView,
+    AccountView,
+    ContractCode,
+    ExecutionOutcome,
+    KeyInfo,
+    TransactionResult,
+)
 from near.units import Amount, Gas
 
 
 def _b64(raw: bytes) -> str:
     return base64.b64encode(raw).decode()
+
+
+PLAIN_ACCOUNT = {"amount": str(10**24), "locked": "0", "code_hash": "1" * 32, "storage_usage": 182}
+
+
+class TestAccountView:
+    def test_plain_account_runs_no_global_contract(self):
+        # nearcore omits both fields unless the account uses a global contract.
+        view = AccountView.model_validate(PLAIN_ACCOUNT)
+        assert view.amount == Amount("1 NEAR")
+        assert view.global_contract_hash is None
+        assert view.global_contract_account_id is None
+
+    def test_global_contract_by_account(self):
+        view = AccountView.model_validate(
+            {**PLAIN_ACCOUNT, "global_contract_account_id": "publisher.near"}
+        )
+        assert view.global_contract_account_id == "publisher.near"
+        assert view.global_contract_hash is None
+
+    def test_global_contract_by_hash(self):
+        view = AccountView.model_validate({**PLAIN_ACCOUNT, "global_contract_hash": "5FzD"})
+        assert view.global_contract_hash == "5FzD"
+        assert view.global_contract_account_id is None
 
 
 class TestAccessKeyView:
@@ -48,23 +77,33 @@ class TestAccessKeyView:
         assert not fc.is_gas_key
         assert fc.gas_key_balance is None
 
-    @pytest.mark.parametrize(
-        "permission",
-        [
-            {"GasKeyFullAccess": {"balance": str(2 * 10**24), "num_nonces": 4}},
+    def test_full_access_gas_key(self):
+        # GasKeyFullAccess may sign anything, exactly like FullAccess.
+        view = AccessKeyView.model_validate(
             {
-                "GasKeyFunctionCall": {
-                    "allowance": None,
-                    "balance": str(2 * 10**24),
-                    "method_names": ["m"],
-                    "num_nonces": 2,
-                    "receiver_id": "app.near",
-                }
-            },
-        ],
-    )
-    def test_gas_key_views(self, permission):
-        view = AccessKeyView.model_validate({"nonce": 0, "permission": permission})
+                "nonce": 0,
+                "permission": {"GasKeyFullAccess": {"balance": str(2 * 10**24), "num_nonces": 4}},
+            }
+        )
+        assert view.is_gas_key
+        assert view.is_full_access
+        assert view.gas_key_balance == Amount("2 NEAR")
+
+    def test_function_call_gas_key(self):
+        view = AccessKeyView.model_validate(
+            {
+                "nonce": 0,
+                "permission": {
+                    "GasKeyFunctionCall": {
+                        "allowance": None,
+                        "balance": str(2 * 10**24),
+                        "method_names": ["m"],
+                        "num_nonces": 2,
+                        "receiver_id": "app.near",
+                    }
+                },
+            }
+        )
         assert view.is_gas_key
         assert not view.is_full_access
         assert view.gas_key_balance == Amount("2 NEAR")

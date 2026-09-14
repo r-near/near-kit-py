@@ -280,14 +280,16 @@ class TestNonceCache:
 
 class TestGasKeyQueryHelpers:
     def test_gas_key_nonces_params(self):
+        # Reads default to the optimistic head, like view(); block picks a height/hash/finality.
         params = _core.gas_key_nonces_params("a.near", "ed25519:abc")
         assert params == {
             "request_type": "view_gas_key_nonces",
             "account_id": "a.near",
             "public_key": "ed25519:abc",
-            "finality": "final",
+            "finality": "optimistic",
         }
-        assert _core.gas_key_nonces_params("a.near", "k", "optimistic")["finality"] == "optimistic"
+        assert _core.gas_key_nonces_params("a.near", "k", "final")["finality"] == "final"
+        assert _core.gas_key_nonces_params("a.near", "k", 42)["block_id"] == 42
 
     def test_access_key_params_finality_override(self):
         assert _core.access_key_params("a.near", "k", "optimistic")["finality"] == "optimistic"
@@ -339,17 +341,19 @@ class TestContractQueryParams:
         params = _core.global_contract_params(code_hash=digest)
         assert params["request_type"] == "view_global_contract_code"
         assert base58.b58decode(params["code_hash"]) == digest
-        assert params["finality"] == "final"
+        assert params["finality"] == "optimistic"
         # a base58 string is passed through in canonical form
         assert _core.global_contract_params(code_hash=params["code_hash"]) == params
+        assert _core.global_contract_params(code_hash=digest, block="final")["finality"] == "final"
 
     def test_global_contract_by_account(self):
         params = _core.global_contract_params(account_id="p.near")
         assert params == {
             "request_type": "view_global_contract_code_by_account_id",
             "account_id": "p.near",
-            "finality": "final",
+            "finality": "optimistic",
         }
+        assert _core.global_contract_params(account_id="p.near", block=7)["block_id"] == 7
 
     def test_global_contract_requires_exactly_one(self):
         with pytest.raises(ValueError, match="exactly one"):

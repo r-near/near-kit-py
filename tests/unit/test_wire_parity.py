@@ -1,17 +1,17 @@
 """Hand-computed Borsh layouts for the nearcore 2.13 action set.
 
-Discriminants 9..14, the gas-key access-key permissions, ``TransactionNonce``
-/ ``NonceMode``, the tagged V1 transaction, and the NEP-611 signing payload.
-Golden vectors at the bottom were generated with near-kit-ts (its zorsh
-schemas), so the two SDKs are proven byte-compatible.
+Discriminants 9..13, the gas-key access-key permissions, ``TransactionNonce``
+/ ``NonceMode`` and the tagged V1 transaction. Golden vectors at the bottom
+were generated with near-kit-ts (its zorsh schemas), so the two SDKs are
+proven byte-compatible.
 """
 
-import base64
 import hashlib
+from typing import get_args
 
 import base58
 import pytest
-from pyborsh import Borsh
+from pyborsh import Borsh, BorshDeserializationError
 from pydantic import BaseModel, ValidationError
 
 from near import (
@@ -27,20 +27,14 @@ from near import (
     use_global_contract,
     withdraw_from_gas_key,
 )
-from near.delegate import (
-    encode_signed_delegate,
-    sign_delegate_action,
-    sign_delegate_action_v2,
-)
+from near.delegate import sign_delegate_action
 from near.keys import KeyPairSigner
 from near.wire import (
-    NEP366_DELEGATE_PREFIX,
-    NEP611_DELEGATE_V2_PREFIX,
     Action,
+    AnyAction,
     AnyNonceMode,
     AnyTransactionNonce,
     DelegateAction,
-    DelegateActionV2,
     GlobalContractIdentifier,
     NonceMode,
     PublicKeyWire,
@@ -49,8 +43,6 @@ from near.wire import (
     Transaction,
     TransactionNonce,
     TransactionV1,
-    VersionedDelegateActionPayload,
-    delegate_action_v2_signing_hash,
     sign_transaction,
     to_global_contract_identifier,
     to_wire_public_key,
@@ -102,59 +94,36 @@ def _action_bytes(action) -> bytes:
     return _tx([action]).to_borsh()[ACTIONS_OFFSET:]
 
 
-def _signed_v2(signer, nonce=None):
-    delegate = DelegateActionV2(
+def _signed_v1(signer, max_block_height=100):
+    delegate = DelegateAction(
         sender_id=signer.account_id,
         receiver_id="bob.near",
         actions=[transfer("1 yocto")],
-        nonce=nonce or TransactionNonce.GasKeyNonce(nonce=5, nonce_index=2),
-        max_block_height=100,
+        nonce=1,
+        max_block_height=max_block_height,
         public_key=to_wire_public_key(signer.public_key),
     )
-    return sign_delegate_action_v2(delegate, signer)
+    return sign_delegate_action(delegate, signer)
 
 
 class TestActionDiscriminants:
     def test_every_variant_in_protocol_order(self):
         signer = KeyPairSigner("alice.near", generate_key())
-        v1 = sign_delegate_action(
-            DelegateAction(
-                sender_id="alice.near",
-                receiver_id="bob.near",
-                actions=[transfer("1 yocto")],
-                nonce=1,
-                max_block_height=100,
-                public_key=to_wire_public_key(signer.public_key),
-            ),
-            signer,
-        )
         cases = [
             (create_account(), 0),
-            (v1, 8),
+            (_signed_v1(signer), 8),
             (publish_contract(b"\x00asm"), 9),
             (use_global_contract(account_id="p.near"), 10),
             (deterministic_state_init(account_id="p.near", deposit="1 yocto"), 11),
             (transfer_to_gas_key(signer.public_key, "1 yocto"), 12),
             (withdraw_from_gas_key(signer.public_key, "1 yocto"), 13),
-            (_signed_v2(signer), 14),
         ]
         for action, discriminant in cases:
             assert _action_bytes(action)[0] == discriminant, type(action).__name__
 
-    def test_all_fifteen_variants_round_trip_in_one_transaction(self):
+    def test_all_fourteen_variants_round_trip_in_one_transaction(self):
         kp = generate_key()
         signer = KeyPairSigner("alice.near", kp)
-        v1 = sign_delegate_action(
-            DelegateAction(
-                sender_id="alice.near",
-                receiver_id="bob.near",
-                actions=[transfer("1 yocto")],
-                nonce=1,
-                max_block_height=2,
-                public_key=to_wire_public_key(kp.public_key),
-            ),
-            signer,
-        )
         tx = _tx(
             [
                 create_account(),
@@ -164,18 +133,26 @@ class TestActionDiscriminants:
                 add_full_access_key(kp.public_key),
                 add_gas_key(kp.public_key, 3),
                 add_gas_key(kp.public_key, 3, contract_id="app.near", method_names=["m"]),
-                v1,
+                _signed_v1(signer, max_block_height=2),
                 publish_contract(b"wasm", identified_by="hash"),
                 use_global_contract(code_hash=bytes(32)),
                 use_global_contract(account_id="p.near"),
                 deterministic_state_init(code_hash=bytes(32), data={b"k": b"v"}, deposit="1 NEAR"),
                 transfer_to_gas_key(kp.public_key, "1 NEAR"),
                 withdraw_from_gas_key(kp.public_key, "1 NEAR"),
-                _signed_v2(signer),
             ],
             kp.public_key,
         )
         assert Transaction.from_borsh(tx.to_borsh()) == tx
+
+    def test_slot_14_is_deliberately_unmodeled(self):
+        # DelegateV2 (14) is left out while nearcore reworks it and 15
+        # (UniversalStateInit) is unreleased: the enum stops at 13, and the
+        # decoder refuses the discriminant rather than misreading a later one.
+        assert len(get_args(AnyAction)) == 14
+        raw = _tx([]).to_borsh()[:-4] + _u32(1) + b"\x0e" + bytes(64)
+        with pytest.raises(BorshDeserializationError):
+            Transaction.from_borsh(raw)
 
 
 class TestGlobalContractLayout:
@@ -394,84 +371,22 @@ class TestTransactionV1Layout:
         assert kp.public_key.verify(signed.signature.data, digest)
 
 
-class TestDelegateV2Layout:
-    def test_versioned_payload_carries_tag(self):
-        signer = KeyPairSigner("alice.near", generate_key())
-        payload = _signed_v2(signer).delegate_action
-        raw = payload.to_borsh()
-        assert raw[0] == 0  # VersionedDelegateActionPayload::V2
-        assert raw[1:] == payload.v2.to_borsh()
-        assert VersionedDelegateActionPayload.from_borsh(raw) == payload
-        with pytest.raises(Exception, match="version"):
-            VersionedDelegateActionPayload.from_borsh(b"\x01" + raw[1:])
-
-    def test_signing_hash_uses_nep611_prefix_over_tagged_payload(self):
-        signer = KeyPairSigner("alice.near", generate_key())
-        payload = _signed_v2(signer).delegate_action
-        prefix = ((1 << 30) + 611).to_bytes(4, "little")
-        assert prefix == b"\x63\x02\x00\x40"
-        expected = hashlib.sha256(prefix + b"\x00" + payload.v2.to_borsh()).digest()
-        assert delegate_action_v2_signing_hash(payload) == expected
-
-    def test_v2_domain_is_distinct_from_v1(self):
-        assert NEP611_DELEGATE_V2_PREFIX == 1073742435
-        assert NEP366_DELEGATE_PREFIX == 1073742190
-
-    def test_action_layout(self):
-        signer = KeyPairSigner("alice.near", generate_key())
-        signed = _signed_v2(signer)
-        raw = _action_bytes(signed)
-        assert raw[:2] == b"\x0e\x00"  # DelegateV2, then the V2 payload tag
-        assert raw[2:].startswith(_string("alice.near") + _string("bob.near"))
-        assert raw.endswith(b"\x00" + signed.signature.data)
-
-    def test_plain_nonce_variant(self):
-        signer = KeyPairSigner("alice.near", generate_key())
-        signed = _signed_v2(signer, nonce=TransactionNonce.Nonce(nonce=9))
-        inner = signed.delegate_action.v2.to_borsh()
-        # after sender, receiver and the one-action vec comes the nonce enum
-        offset = len(_string("alice.near") + _string("bob.near") + _u32(1) + b"\x03" + _u128(1))
-        assert inner[offset : offset + 9] == b"\x00" + _u64(9)
-
-
 class TestNonDelegateActionGuard:
-    def test_v1_delegate_cannot_nest_either_version(self):
+    def test_delegate_cannot_nest(self):
         signer = KeyPairSigner("alice.near", generate_key())
-        v2 = _signed_v2(signer)
-        v1 = sign_delegate_action(
+        with pytest.raises(ValidationError):
             DelegateAction(
                 sender_id="alice.near",
                 receiver_id="bob.near",
-                actions=[transfer("1 yocto")],
+                actions=[_signed_v1(signer)],
                 nonce=1,
                 max_block_height=2,
                 public_key=to_wire_public_key(signer.public_key),
-            ),
-            signer,
-        )
-        for nested in (v1, v2):
-            with pytest.raises(ValidationError):
-                DelegateAction(
-                    sender_id="alice.near",
-                    receiver_id="bob.near",
-                    actions=[nested],
-                    nonce=1,
-                    max_block_height=2,
-                    public_key=to_wire_public_key(signer.public_key),
-                )
-            with pytest.raises(ValidationError):
-                DelegateActionV2(
-                    sender_id="alice.near",
-                    receiver_id="bob.near",
-                    actions=[nested],
-                    nonce=TransactionNonce.Nonce(nonce=1),
-                    max_block_height=2,
-                    public_key=to_wire_public_key(signer.public_key),
-                )
+            )
 
     def test_new_actions_keep_discriminants_inside_a_delegate(self):
         pk = generate_key().public_key
-        delegate = DelegateActionV2(
+        delegate = DelegateAction(
             sender_id="alice.near",
             receiver_id="bob.near",
             actions=[
@@ -481,45 +396,24 @@ class TestNonDelegateActionGuard:
                 transfer_to_gas_key(pk, "1 yocto"),
                 withdraw_from_gas_key(pk, "1 yocto"),
             ],
-            nonce=TransactionNonce.Nonce(nonce=1),
+            nonce=1,
             max_block_height=2,
             public_key=to_wire_public_key(pk),
         )
         raw = delegate.to_borsh()
         body = raw[len(_string("alice.near") + _string("bob.near")) + 4 :]
         assert body[0] == 9
-        assert DelegateActionV2.from_borsh(raw) == delegate
+        assert DelegateAction.from_borsh(raw) == delegate
 
 
 # ---------------------------------------------------------------------------
 # Cross-language golden vectors, generated with near-kit-ts (src/core/schema.ts,
-# @zorsh/zorsh 0.5.0): serializeDelegateActionV2 / signedDelegateV2 /
-# encodeSignedDelegateActionV2 / serializeTransactionV1 /
-# serializeSignedTransactionV1 for the fixed inputs reproduced below.
+# @zorsh/zorsh 0.5.0): serializeTransactionV1 / serializeSignedTransactionV1
+# for the fixed inputs reproduced below.
 # ---------------------------------------------------------------------------
 
 _TS_PK = bytes([8]) * 32
 _TS_SIG = bytes([12]) * 64
-TS_V2_PAYLOAD_HEX = (
-    "00"  # VersionedDelegateActionPayload::V2
-    "0a000000616c6963652e6e656172"  # alice.near
-    "08000000626f622e6e656172"  # bob.near
-    "02000000"  # 2 actions
-    "03e8030000000000000000000000000000"  # Transfer 1000 yocto
-    "020500000067726565740e0000007b226e616d65223a22626f62227d"  # FunctionCall greet(args)
-    "00e057eb481b0000"  # gas 30 Tgas
-    "01000000000000000000000000000000"  # deposit 1 yocto
-    "010500000000000000" + "0200"  # GasKeyNonce { nonce: 5, nonce_index: 2 }
-    "e803000000000000"  # max_block_height 1000
-    "00" + _TS_PK.hex()  # ed25519 public key
-)
-TS_V2_SIGNING_HASH = "107f7d2cc1bf1bea897d60c177e7757f18f219ff95ac0cf9ab05e5f9f36807c1"
-TS_V2_ENCODED_B64 = (
-    "AAoAAABhbGljZS5uZWFyCAAAAGJvYi5uZWFyAgAAAAPoAwAAAAAAAAAAAAAAAAAAAgUAAABncmVldA4AAAB7Im5h"
-    "bWUiOiJib2IifQDgV+tIGwAAAQAAAAAAAAAAAAAAAAAAAAEFAAAAAAAAAAIA6AMAAAAAAAAACAgICAgICAgICAgI"
-    "CAgICAgICAgICAgICAgICAgICAgADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw"
-    "MDAwMDAwMDAwMDAwMDAwMDAwMDA=="
-)
 TS_TX_V1_HEX = (
     "01"  # Transaction::V1 tag
     "0a000000616c6963652e6e656172"
@@ -532,34 +426,6 @@ TS_TX_V1_HASH_B58 = "CTiJAvymxtKdfAWh7uq1N8pSiXxH4tk7FpjvhQrhFdyq"
 
 
 class TestNearKitTsGoldenVectors:
-    def _payload(self):
-        return VersionedDelegateActionPayload(
-            v2=DelegateActionV2(
-                sender_id="alice.near",
-                receiver_id="bob.near",
-                actions=[
-                    transfer("1000 yocto"),
-                    function_call("greet", {"name": "bob"}, gas="30 Tgas", deposit="1 yocto"),
-                ],
-                nonce=TransactionNonce.GasKeyNonce(nonce=5, nonce_index=2),
-                max_block_height=1000,
-                public_key=PublicKeyWire.Ed25519(data=_TS_PK),
-            )
-        )
-
-    def test_delegate_v2_signing_bytes_and_hash(self):
-        payload = self._payload()
-        assert payload.to_borsh().hex() == TS_V2_PAYLOAD_HEX
-        assert delegate_action_v2_signing_hash(payload).hex() == TS_V2_SIGNING_HASH
-
-    def test_delegate_v2_action_and_transport_encoding(self):
-        action = Action.DelegateV2(
-            delegate_action=self._payload(), signature=SignatureWire.Ed25519(data=_TS_SIG)
-        )
-        assert _action_bytes(action).hex() == "0e" + TS_V2_PAYLOAD_HEX + "00" + _TS_SIG.hex()
-        assert encode_signed_delegate(action) == TS_V2_ENCODED_B64
-        assert base64.b64decode(TS_V2_ENCODED_B64) == action.to_borsh()
-
     def test_transaction_v1_bytes_hash_and_signed_form(self):
         tx = TransactionV1(
             signer_id="alice.near",

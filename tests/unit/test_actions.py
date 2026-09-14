@@ -65,11 +65,6 @@ class TestAddGasKey:
         with pytest.raises(TypeError, match="num_nonces must be an int"):
             add_gas_key(generate_key().public_key, num_nonces)
 
-    def test_allowance_rejected(self):
-        # The protocol refuses AddKey for a gas function-call key carrying an allowance.
-        with pytest.raises(ValueError, match="allowance"):
-            add_gas_key(generate_key().public_key, 1, contract_id="app.near", allowance="1 NEAR")
-
     def test_method_names_need_a_contract(self):
         with pytest.raises(ValueError, match="requires contract_id"):
             add_gas_key(generate_key().public_key, 1, method_names=["m"])

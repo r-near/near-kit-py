@@ -117,6 +117,44 @@ class TestClassifyRpcError:
         assert err.available is None
         assert "?" in str(err)
 
+    def test_not_enough_gas_key_balance(self):
+        # nearcore 2.13: the signing gas key's own prepaid balance could not cover the gas.
+        error = _handler_error(
+            "INVALID_TRANSACTION",
+            data={
+                "TxExecutionError": {
+                    "InvalidTxError": {
+                        "NotEnoughGasKeyBalance": {
+                            "signer_id": "alice.near",
+                            "balance": "1",
+                            "cost": str(10**23),
+                        }
+                    }
+                }
+            },
+        )
+        err = classify_rpc_error(error)
+        assert isinstance(err, InsufficientBalanceError)
+        assert err.available == 1
+        assert err.required == 10**23
+        assert err.retryable is False
+        assert "gas key of alice.near" in str(err)
+        assert "needs 0.1 NEAR" in str(err)
+
+    def test_invalid_nonce_index_stays_a_plain_rpc_error(self):
+        error = _handler_error(
+            "INVALID_TRANSACTION",
+            data={
+                "TxExecutionError": {
+                    "InvalidTxError": {"InvalidNonceIndex": {"tx_nonce_index": 9, "num_nonces": 4}}
+                }
+            },
+        )
+        err = classify_rpc_error(error)
+        assert type(err) is RpcError
+        assert err.code == "INVALID_TRANSACTION"
+        assert err.retryable is False
+
     def test_expired_transaction(self):
         error = _handler_error(
             "INVALID_TRANSACTION",

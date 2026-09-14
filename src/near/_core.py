@@ -120,13 +120,13 @@ def access_key_list_params(account_id: str, block: int | str | None = None) -> d
 
 
 def gas_key_nonces_params(
-    account_id: str, public_key: str, finality: str = "final"
+    account_id: str, public_key: str, block: int | str | None = None
 ) -> dict[str, Any]:
     return {
         "request_type": "view_gas_key_nonces",
         "account_id": account_id,
         "public_key": public_key,
-        "finality": finality,
+        **_block_ref(block),
     }
 
 
@@ -135,7 +135,10 @@ def contract_code_params(account_id: str, block: int | str | None = None) -> dic
 
 
 def global_contract_params(
-    *, code_hash: str | bytes | None = None, account_id: str | None = None
+    *,
+    code_hash: str | bytes | None = None,
+    account_id: str | None = None,
+    block: int | str | None = None,
 ) -> dict[str, Any]:
     """Query params for a global contract by hash or publisher (exactly one)."""
     identifier = to_global_contract_identifier(code_hash=code_hash, account_id=account_id)
@@ -143,12 +146,12 @@ def global_contract_params(
         return {
             "request_type": "view_global_contract_code",
             "code_hash": base58.b58encode(identifier.code_hash).decode(),
-            "finality": "final",
+            **_block_ref(block),
         }
     return {
         "request_type": "view_global_contract_code_by_account_id",
         "account_id": identifier.account_id,
-        "finality": "final",
+        **_block_ref(block),
     }
 
 

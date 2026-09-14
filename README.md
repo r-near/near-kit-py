@@ -204,7 +204,7 @@ def test_my_app(sandbox_near):
     fast_forward(sandbox_near, 100)  # time travel: 100 blocks, no waiting
 ```
 
-## Meta-transactions (NEP-366 / NEP-611)
+## Meta-transactions (NEP-366)
 
 User signs, relayer pays gas:
 
@@ -213,13 +213,12 @@ User signs, relayer pays gas:
 signed = client.sign_delegate("app.near", actions=[function_call("claim", {})])
 payload = encode_signed_delegate(signed)          # base64, POST it to your relayer
 
-# Relayer side (V1 and V2 payloads alike):
+# Relayer side:
 relayer.send_delegate(payload)
 ```
 
-`sign_delegate_v2` produces nearcore 2.13's `DelegateV2` — the same idea,
-signed under its own domain tag, and the only delegate a gas key may sign:
-`client.sign_delegate_v2("app.near", actions=[...], gas_key_index=0)`.
+nearcore 2.13's `DelegateV2` (NEP-611, the gas-key flavour of delegate
+actions) is deliberately not modeled while the feature is reworked upstream.
 
 ## Global contracts
 
@@ -331,7 +330,8 @@ client = Near(network="mainnet", signer=KmsSigner())
 
 Borsh serialization via [pyborsh](https://github.com/r-near/pyborsh)
 (Pydantic-native, byte-verified against Rust), ed25519/ML-DSA via
-[pyca/cryptography](https://cryptography.io), HTTP via
+[pyca/cryptography](https://cryptography.io), NEP-616 Keccak-256 via
+[pycryptodome](https://www.pycryptodome.org), HTTP via
 [httpx](https://www.python-httpx.org). Every transaction byte this library
 produces is verified end-to-end against a real nearcore node in CI.
 

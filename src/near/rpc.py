@@ -64,29 +64,8 @@ def classify_rpc_error(error: dict[str, Any], status_code: int | None = None) ->
     if cause_name == "INVALID_TRANSACTION" and isinstance(data, dict):
         tx_error = data.get("TxExecutionError") or data
         invalid_tx = tx_error.get("InvalidTxError") if isinstance(tx_error, dict) else None
-        if isinstance(invalid_tx, dict):
-            if isinstance(invalid_tx.get("InvalidNonce"), dict):
-                nonce_info = invalid_tx["InvalidNonce"]
-                return InvalidNonceError(
-                    f"Invalid nonce: tx nonce {nonce_info.get('tx_nonce')} vs "
-                    f"access key nonce {nonce_info.get('ak_nonce')}",
-                    ak_nonce=nonce_info.get("ak_nonce"),
-                    data=error,
-                )
-            if isinstance(invalid_tx.get("NotEnoughBalance"), dict):
-                balance_info = invalid_tx["NotEnoughBalance"]
-                required = balance_info.get("cost")
-                available = balance_info.get("balance")
-                return InsufficientBalanceError(
-                    f"Not enough balance: {balance_info.get('signer_id')} has "
-                    f"{Amount.yocto(int(available)) if available else '?'}, needs "
-                    f"{Amount.yocto(int(required)) if required else '?'}",
-                    required=int(required) if required else None,
-                    available=int(available) if available else None,
-                    data=error,
-                )
-            if "Expired" in invalid_tx:
-                return TransactionExpiredError(data=error)
+        if isinstance(invalid_tx, dict) and (typed := _classify_invalid_tx(invalid_tx, error)):
+            return typed
 
     retryable = cause_name in _RETRYABLE_CAUSES or (
         status_code is not None and (status_code in _RETRYABLE_STATUS or status_code >= 500)
@@ -122,6 +101,49 @@ def _global_contract_label(identifier: Any) -> str:
         kind, value = next(iter(identifier.items()))
         return f"global contract {kind} {value}"
     return f"global contract {identifier}"
+
+
+def _classify_invalid_tx(invalid_tx: dict[str, Any], error: dict[str, Any]) -> NearError | None:
+    """The typed ``InvalidTxError`` variants of a rejected ``send_tx``, or ``None``.
+
+    Anything else (``InvalidSignature``, ``InvalidNonceIndex``, ...) stays a
+    plain ``RpcError`` carrying the ``INVALID_TRANSACTION`` code.
+    """
+    if isinstance(invalid_tx.get("InvalidNonce"), dict):
+        nonce_info = invalid_tx["InvalidNonce"]
+        return InvalidNonceError(
+            f"Invalid nonce: tx nonce {nonce_info.get('tx_nonce')} vs "
+            f"access key nonce {nonce_info.get('ak_nonce')}",
+            ak_nonce=nonce_info.get("ak_nonce"),
+            data=error,
+        )
+    if isinstance(invalid_tx.get("NotEnoughBalance"), dict):
+        balance_info = invalid_tx["NotEnoughBalance"]
+        return _insufficient_balance(balance_info, str(balance_info.get("signer_id")), error)
+    if isinstance(invalid_tx.get("NotEnoughGasKeyBalance"), dict):
+        # The signing gas key's own prepaid balance could not cover the gas.
+        balance_info = invalid_tx["NotEnoughGasKeyBalance"]
+        return _insufficient_balance(
+            balance_info, f"the gas key of {balance_info.get('signer_id')}", error
+        )
+    if "Expired" in invalid_tx:
+        return TransactionExpiredError(data=error)
+    return None
+
+
+def _insufficient_balance(
+    balance_info: dict[str, Any], subject: str, error: dict[str, Any]
+) -> InsufficientBalanceError:
+    required = balance_info.get("cost")
+    available = balance_info.get("balance")
+    return InsufficientBalanceError(
+        f"Not enough balance: {subject} has "
+        f"{Amount.yocto(int(available)) if available else '?'}, needs "
+        f"{Amount.yocto(int(required)) if required else '?'}",
+        required=int(required) if required else None,
+        available=int(available) if available else None,
+        data=error,
+    )
 
 
 def raise_for_execution_failure(result: dict[str, Any]) -> None:

@@ -1,5 +1,7 @@
 """NEP-616 deterministic account IDs: derivation, canonical encoding, cross-language vectors."""
 
+import hashlib
+
 import pytest
 
 from near import (
@@ -7,6 +9,7 @@ from near import (
     deterministic_state_init,
     is_deterministic_account_id,
 )
+from near.state_init import _keccak256
 from near.wire import DeterministicAccountStateInit, GlobalContractIdentifier
 
 
@@ -25,6 +28,25 @@ TS_DERIVED_BY_HASH = "0sd7edcaae250c1c526ddd82f35d6034996c0c1060"  # code hash =
 TS_DERIVED_EMPTY_BY_ACCOUNT = (
     "0s2293da2d32cd0a067950616036ff973884abab0a"  # publisher.near, no data
 )
+
+
+class TestKeccak256:
+    """The hash must be the original Keccak (``0x01`` padding), which is what
+    NEP-616 and Ethereum use — not FIPS-202 SHA3-256, which pads with ``0x06``.
+    """
+
+    @pytest.mark.parametrize(
+        ("data", "digest"),
+        [
+            (b"", "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"),
+            (b"hello world", "47173285a8d7341e5e972fc677286384f802f8ef42a5ec5f03bbfa254cb01fad"),
+        ],
+    )
+    def test_known_vectors(self, data, digest):
+        assert _keccak256(data).hex() == digest
+
+    def test_is_not_sha3_256(self):
+        assert _keccak256(b"") != hashlib.sha3_256(b"").digest()
 
 
 class TestDerivation:

@@ -8,12 +8,7 @@ import pytest
 from near import AsyncNear, Near, SignerRequiredError, transfer
 from near.keys import KeyPairSigner, generate_key
 from near.nep413 import verify_message
-from near.wire import (
-    Action,
-    TransactionNonce,
-    delegate_action_signing_hash,
-    delegate_action_v2_signing_hash,
-)
+from near.wire import delegate_action_signing_hash
 
 
 @pytest.fixture
@@ -146,45 +141,6 @@ class TestOfflineSigning:
             assert signer.public_key.verify(signed.signature.data, digest)
 
 
-class TestOfflineDelegateV2:
-    def test_sign_delegate_v2_with_explicit_nonce_and_height(self, clean_env, signer):
-        with Near("sandbox", signer=signer) as near:
-            signed = near.sign_delegate_v2(
-                "bob.sandbox", [transfer("1 yocto")], nonce=7, max_block_height=99
-            )
-            assert isinstance(signed, Action.DelegateV2)
-            inner = signed.delegate_action.v2
-            assert inner.sender_id == "alice.sandbox"
-            assert inner.nonce == TransactionNonce.Nonce(nonce=7)
-            assert inner.max_block_height == 99
-            digest = delegate_action_v2_signing_hash(signed.delegate_action)
-            assert signer.public_key.verify(signed.signature.data, digest)
-
-    def test_gas_key_index_addresses_a_lane(self, clean_env, signer):
-        with Near("sandbox", signer=signer) as near:
-            signed = near.sign_delegate_v2(
-                "bob.sandbox", [transfer("1 yocto")], gas_key_index=3, nonce=7, max_block_height=99
-            )
-            assert signed.delegate_action.v2.nonce == TransactionNonce.GasKeyNonce(
-                nonce=7, nonce_index=3
-            )
-
-    async def test_async_sign_delegate_v2(self, clean_env, signer):
-        async with AsyncNear("sandbox", signer=signer) as near:
-            signed = await near.sign_delegate_v2(
-                "bob.sandbox", [transfer("1 yocto")], gas_key_index=1, nonce=7, max_block_height=99
-            )
-            assert signed.delegate_action.v2.nonce == TransactionNonce.GasKeyNonce(
-                nonce=7, nonce_index=1
-            )
-            digest = delegate_action_v2_signing_hash(signed.delegate_action)
-            assert signer.public_key.verify(signed.signature.data, digest)
-
-    def test_requires_signer(self, clean_env):
-        with Near("sandbox") as near, pytest.raises(SignerRequiredError):
-            near.sign_delegate_v2("bob.sandbox", [transfer("1 yocto")])
-
-
 class TestGasKeyIndexValidation:
     """Bad lane indexes fail before any network round trip."""
 
@@ -193,7 +149,7 @@ class TestGasKeyIndexValidation:
             with pytest.raises(ValueError, match=r"0\.\.=65535"):
                 near.send_transaction("bob.sandbox", [transfer("1 yocto")], gas_key_index=-1)
             with pytest.raises(TypeError, match="gas_key_index"):
-                near.sign_delegate_v2("bob.sandbox", [transfer("1 yocto")], gas_key_index="2")  # type: ignore[arg-type]
+                near.send_transaction("bob.sandbox", [transfer("1 yocto")], gas_key_index="2")  # type: ignore[arg-type]
 
     async def test_async(self, clean_env, signer):
         async with AsyncNear("sandbox", signer=signer) as near:
@@ -202,7 +158,7 @@ class TestGasKeyIndexValidation:
                     "bob.sandbox", [transfer("1 yocto")], gas_key_index=70_000
                 )
             with pytest.raises(TypeError, match="gas_key_index"):
-                await near.sign_delegate_v2(
+                await near.send_transaction(
                     "bob.sandbox",
                     [transfer("1 yocto")],
                     gas_key_index=True,  # type: ignore[arg-type]
