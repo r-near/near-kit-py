@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from .client import Near
     from .testing import SandboxHandle
 
-SANDBOX_IMAGE = "nearprotocol/sandbox:2.13.1"
+SANDBOX_IMAGE = "nearprotocol/sandbox:2.13.4"
 LOCAL_SANDBOX_URL = "http://localhost:3030"
 _READY_TIMEOUT = 90.0
 # pick_free_port() races anything else grabbing ports between the probe and

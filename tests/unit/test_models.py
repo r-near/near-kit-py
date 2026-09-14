@@ -1,7 +1,9 @@
 import base64
 
-from near.models import AccessKeyView, ExecutionOutcome, KeyInfo, TransactionResult
-from near.units import Gas
+import pytest
+
+from near.models import AccessKeyView, ContractCode, ExecutionOutcome, KeyInfo, TransactionResult
+from near.units import Amount, Gas
 
 
 def _b64(raw: bytes) -> str:
@@ -35,6 +37,47 @@ class TestAccessKeyView:
         )
         assert info.public_key == "ed25519:abc"
         assert info.access_key.is_full_access
+
+    def test_ordinary_keys_are_not_gas_keys(self):
+        full = AccessKeyView.model_validate({"nonce": 7, "permission": "FullAccess"})
+        assert not full.is_gas_key
+        assert full.gas_key_balance is None
+        fc = AccessKeyView.model_validate(
+            {"nonce": 0, "permission": {"FunctionCall": {"receiver_id": "a", "method_names": []}}}
+        )
+        assert not fc.is_gas_key
+        assert fc.gas_key_balance is None
+
+    @pytest.mark.parametrize(
+        "permission",
+        [
+            {"GasKeyFullAccess": {"balance": str(2 * 10**24), "num_nonces": 4}},
+            {
+                "GasKeyFunctionCall": {
+                    "allowance": None,
+                    "balance": str(2 * 10**24),
+                    "method_names": ["m"],
+                    "num_nonces": 2,
+                    "receiver_id": "app.near",
+                }
+            },
+        ],
+    )
+    def test_gas_key_views(self, permission):
+        view = AccessKeyView.model_validate({"nonce": 0, "permission": permission})
+        assert view.is_gas_key
+        assert not view.is_full_access
+        assert view.gas_key_balance == Amount("2 NEAR")
+
+
+class TestContractCode:
+    def test_decodes_code_base64(self):
+        code = ContractCode.model_validate({"code_base64": _b64(b"\x00asm"), "hash": "5FzD"})
+        assert code.code == b"\x00asm"
+        assert code.hash == "5FzD"
+
+    def test_raw_bytes_accepted(self):
+        assert ContractCode(code=b"raw", hash="h").code == b"raw"
 
 
 class TestExecutionOutcome:

@@ -1,6 +1,6 @@
 """Integration fixtures: connect to a NEAR sandbox at localhost:3030.
 
-Start one with:  docker run -d -p 3030:3030 nearprotocol/sandbox:2.13.1
+Start one with:  docker run -d -p 3030:3030 nearprotocol/sandbox:2.13.4
 Override the URL with NEAR_SANDBOX_URL (e.g. to run parallel suites against
 containers on different ports). Tests are skipped automatically when no
 sandbox is reachable.
@@ -77,6 +77,11 @@ def run_id():
 @pytest.fixture(scope="session")
 def sandbox_url():
     return SANDBOX_URL
+
+
+@pytest.fixture(scope="session")
+def guestbook_wasm() -> bytes:
+    return GUESTBOOK_WASM.read_bytes()
 
 
 @pytest.fixture(scope="session")

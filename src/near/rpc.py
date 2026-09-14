@@ -15,7 +15,9 @@ from typing import Any
 import httpx
 
 from .errors import (
+    AccessKeyNotFoundError,
     AccountNotFoundError,
+    ContractNotFoundError,
     InsufficientBalanceError,
     InvalidAccountIdError,
     InvalidNonceError,
@@ -56,10 +58,8 @@ def classify_rpc_error(error: dict[str, Any], status_code: int | None = None) ->
     message = error.get("message") or "RPC error"
     data = error.get("data")
 
-    if cause_name == "UNKNOWN_ACCOUNT":
-        return AccountNotFoundError(str(info.get("requested_account_id", "unknown")), data=error)
-    if cause_name == "INVALID_ACCOUNT":
-        return InvalidAccountIdError(str(info.get("requested_account_id", "unknown")), data=error)
+    if (not_found := _classify_query_error(cause_name, info, error)) is not None:
+        return not_found
 
     if cause_name == "INVALID_TRANSACTION" and isinstance(data, dict):
         tx_error = data.get("TxExecutionError") or data
@@ -94,6 +94,34 @@ def classify_rpc_error(error: dict[str, Any], status_code: int | None = None) ->
     rpc_error = RpcError(f"RPC error [{cause_name}]: {message}", retryable=retryable, data=error)
     rpc_error.code = cause_name
     return rpc_error
+
+
+def _classify_query_error(
+    cause_name: str, info: dict[str, Any], error: dict[str, Any]
+) -> NearError | None:
+    """The typed "does not exist" errors a ``query`` can return, or ``None``."""
+    if cause_name == "UNKNOWN_ACCOUNT":
+        return AccountNotFoundError(str(info.get("requested_account_id", "unknown")), data=error)
+    if cause_name == "INVALID_ACCOUNT":
+        return InvalidAccountIdError(str(info.get("requested_account_id", "unknown")), data=error)
+    if cause_name in ("UNKNOWN_ACCESS_KEY", "UNKNOWN_GAS_KEY"):
+        # The node names only the key here; clients re-raise with the account they asked about.
+        return AccessKeyNotFoundError(None, str(info.get("public_key", "unknown")), data=error)
+    if cause_name == "NO_CONTRACT_CODE":
+        return ContractNotFoundError(
+            f"account {info.get('contract_account_id', 'unknown')}", data=error
+        )
+    if cause_name == "NO_GLOBAL_CONTRACT_CODE":
+        return ContractNotFoundError(_global_contract_label(info.get("identifier")), data=error)
+    return None
+
+
+def _global_contract_label(identifier: Any) -> str:
+    """``{"hash": ...}`` / ``{"account_id": ...}`` (nearcore's JSON) as readable text."""
+    if isinstance(identifier, dict) and len(identifier) == 1:
+        kind, value = next(iter(identifier.items()))
+        return f"global contract {kind} {value}"
+    return f"global contract {identifier}"
 
 
 def raise_for_execution_failure(result: dict[str, Any]) -> None:

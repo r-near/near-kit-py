@@ -1,12 +1,14 @@
 import json
 import threading
 
+import base58
 import pytest
 
-from near import _core
+from near import _core, transfer
 from near.errors import ContractPanicError, RpcError, SignerRequiredError
 from near.keys import KeyPairSigner, generate_key
 from near.units import Amount
+from near.wire import NonceMode, Transaction, TransactionNonce, TransactionV1
 
 
 @pytest.fixture
@@ -262,3 +264,126 @@ class TestNonceCache:
         for thread in threads:
             thread.join()
         assert sorted(results) == list(range(1, 33))
+
+    def test_gas_key_lanes_are_separate_keys(self):
+        signer = KeyPairSigner("alice.near", generate_key())
+        plain = _core.NonceCache.key(signer)
+        lane0 = _core.NonceCache.key(signer, 0)
+        lane1 = _core.NonceCache.key(signer, 1)
+        assert lane0 == f"{plain}#0"
+        assert len({plain, lane0, lane1}) == 3
+        cache = _core.NonceCache()
+        assert cache.reserve(lane0, 100) == 101
+        assert cache.reserve(lane1, 7) == 8
+        assert cache.reserve(plain, None) == 1
+
+
+class TestGasKeyQueryHelpers:
+    def test_gas_key_nonces_params(self):
+        params = _core.gas_key_nonces_params("a.near", "ed25519:abc")
+        assert params == {
+            "request_type": "view_gas_key_nonces",
+            "account_id": "a.near",
+            "public_key": "ed25519:abc",
+            "finality": "final",
+        }
+        assert _core.gas_key_nonces_params("a.near", "k", "optimistic")["finality"] == "optimistic"
+
+    def test_access_key_params_finality_override(self):
+        assert _core.access_key_params("a.near", "k", "optimistic")["finality"] == "optimistic"
+
+    def test_nonces_from_result(self):
+        assert _core.nonces_from_result({"nonces": [5, "6", 7]}) == [5, 6, 7]
+
+    @pytest.mark.parametrize("payload", [{}, {"nonces": None}, {"nonces": ["x"]}])
+    def test_malformed_nonces_raise(self, payload):
+        with pytest.raises(RpcError, match="Malformed view_gas_key_nonces"):
+            _core.nonces_from_result(payload)
+
+    def test_lane_nonce(self):
+        assert _core.lane_nonce([10, 20, 30], 1, "a.near", "k") == 20
+        with pytest.raises(ValueError, match="3 nonce lanes; gas_key_index 3"):
+            _core.lane_nonce([10, 20, 30], 3, "a.near", "k")
+
+    @pytest.mark.parametrize("index", [None, 0, 7, 65535])
+    def test_validate_gas_key_index_accepts(self, index):
+        assert _core.validate_gas_key_index(index) == index
+
+    @pytest.mark.parametrize("index", [-1, 65536])
+    def test_validate_gas_key_index_range(self, index):
+        with pytest.raises(ValueError, match=r"0\.\.=65535"):
+            _core.validate_gas_key_index(index)
+
+    @pytest.mark.parametrize("index", [True, "0", 1.0])
+    def test_validate_gas_key_index_type(self, index):
+        with pytest.raises(TypeError, match="gas_key_index must be an int"):
+            _core.validate_gas_key_index(index)
+
+    def test_transaction_nonce(self):
+        assert _core.transaction_nonce(5, None) == TransactionNonce.Nonce(nonce=5)
+        assert _core.transaction_nonce(5, 2) == TransactionNonce.GasKeyNonce(nonce=5, nonce_index=2)
+
+
+class TestContractQueryParams:
+    def test_contract_code_params(self):
+        params = _core.contract_code_params("app.near")
+        assert params == {
+            "request_type": "view_code",
+            "account_id": "app.near",
+            "finality": "optimistic",
+        }
+        assert _core.contract_code_params("app.near", block=9)["block_id"] == 9
+
+    def test_global_contract_by_hash_uses_base58(self):
+        digest = bytes(range(32))
+        params = _core.global_contract_params(code_hash=digest)
+        assert params["request_type"] == "view_global_contract_code"
+        assert base58.b58decode(params["code_hash"]) == digest
+        assert params["finality"] == "final"
+        # a base58 string is passed through in canonical form
+        assert _core.global_contract_params(code_hash=params["code_hash"]) == params
+
+    def test_global_contract_by_account(self):
+        params = _core.global_contract_params(account_id="p.near")
+        assert params == {
+            "request_type": "view_global_contract_code_by_account_id",
+            "account_id": "p.near",
+            "finality": "final",
+        }
+
+    def test_global_contract_requires_exactly_one(self):
+        with pytest.raises(ValueError, match="exactly one"):
+            _core.global_contract_params()
+
+
+class TestBuildTransaction:
+    def _build(self, **kwargs):
+        signer = KeyPairSigner("alice.near", generate_key())
+        block_hash = base58.b58encode(bytes(range(32))).decode()
+        return _core.build_transaction(
+            signer, "bob.near", [transfer("1 yocto")], 9, block_hash, **kwargs
+        )
+
+    def test_default_is_v0(self):
+        tx = self._build()
+        assert isinstance(tx, Transaction)
+        assert tx.nonce == 9
+        assert tx.block_hash == bytes(range(32))
+
+    def test_gas_key_index_selects_v1_with_lane_nonce(self):
+        tx = self._build(gas_key_index=3)
+        assert isinstance(tx, TransactionV1)
+        assert tx.nonce == TransactionNonce.GasKeyNonce(nonce=9, nonce_index=3)
+        assert isinstance(tx.nonce_mode, NonceMode.Monotonic)
+
+    def test_strict_nonce_selects_v1_with_plain_nonce(self):
+        tx = self._build(strict_nonce=True)
+        assert isinstance(tx, TransactionV1)
+        assert tx.nonce == TransactionNonce.Nonce(nonce=9)
+        assert isinstance(tx.nonce_mode, NonceMode.Strict)
+
+    def test_gas_key_and_strict_combine(self):
+        tx = self._build(gas_key_index=0, strict_nonce=True)
+        assert isinstance(tx, TransactionV1)
+        assert tx.nonce == TransactionNonce.GasKeyNonce(nonce=9, nonce_index=0)
+        assert isinstance(tx.nonce_mode, NonceMode.Strict)

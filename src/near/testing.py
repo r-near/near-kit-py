@@ -2,7 +2,7 @@
 
 Run the official sandbox like a database service::
 
-    docker run -d -p 3030:3030 nearprotocol/sandbox:2.13.1
+    docker run -d -p 3030:3030 nearprotocol/sandbox:2.13.4
 
 and connect with the deterministic root key::
 

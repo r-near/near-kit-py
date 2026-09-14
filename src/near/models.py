@@ -10,13 +10,14 @@ import base64
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from .units import Amount, Gas
 
 __all__ = [
     "AccessKeyView",
     "AccountView",
+    "ContractCode",
     "ExecutionOutcome",
     "KeyInfo",
     "TransactionResult",
@@ -48,12 +49,47 @@ class AccessKeyView(_Model):
     def is_full_access(self) -> bool:
         return self.permission == "FullAccess"
 
+    @property
+    def is_gas_key(self) -> bool:
+        """Whether this is a gas key (its ``nonce`` is then unused; see ``gas_key_nonces``)."""
+        return self._gas_key_info() is not None
+
+    @property
+    def gas_key_balance(self) -> Amount | None:
+        """The prepaid gas balance of a gas key, ``None`` for ordinary keys."""
+        info = self._gas_key_info()
+        return Amount.yocto(int(info["balance"])) if info is not None else None
+
+    def _gas_key_info(self) -> dict[str, Any] | None:
+        if isinstance(self.permission, dict):
+            for kind in ("GasKeyFullAccess", "GasKeyFunctionCall"):
+                if isinstance(info := self.permission.get(kind), dict):
+                    return info
+        return None
+
 
 class KeyInfo(_Model):
     """One entry of a ``view_access_key_list`` query."""
 
     public_key: str
     access_key: AccessKeyView
+
+
+class ContractCode(_Model):
+    """Deployed WASM and its hash (``view_code`` / ``view_global_contract_code``)."""
+
+    code: bytes
+    hash: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _decode_rpc_code(cls, data: Any) -> Any:
+        # The RPC ships the WASM as ``code_base64`` text; decode it into ``code``.
+        if isinstance(data, dict) and "code_base64" in data:
+            encoded = data["code_base64"]
+            data = {k: v for k, v in data.items() if k != "code_base64"}
+            data.setdefault("code", base64.b64decode(encoded))
+        return data
 
 
 class ExecutionOutcome(_Model):
