@@ -72,7 +72,7 @@ from .state_init import derive_deterministic_account_id, is_deterministic_accoun
 from .tokens import FTMetadata, TokenAmount
 from .units import DEFAULT_GAS, MAX_GAS, ONE_YOCTO, ZERO, Amount, Gas
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 
 # ---------------------------------------------------------------------------

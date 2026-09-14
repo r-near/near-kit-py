@@ -2,6 +2,34 @@
 
 <!-- version list -->
 
+## v1.3.0 (2026-09-14)
+
+### Bug Fixes
+
+- **client**: Serialize strict-nonce sends per key
+  ([#5](https://github.com/r-near/near-kit-py/pull/5),
+  [`30d72cf`](https://github.com/r-near/near-kit-py/commit/30d72cfae71ae82373fa0ede683cce23323e1a7d))
+
+### Features
+
+- **actions**: Drop DelegateV2, use pycryptodome keccak, address review
+  ([#5](https://github.com/r-near/near-kit-py/pull/5),
+  [`30d72cf`](https://github.com/r-near/near-kit-py/commit/30d72cfae71ae82373fa0ede683cce23323e1a7d))
+
+- **actions**: Full nearcore 2.13 action parity ([#5](https://github.com/r-near/near-kit-py/pull/5),
+  [`30d72cf`](https://github.com/r-near/near-kit-py/commit/30d72cfae71ae82373fa0ede683cce23323e1a7d))
+
+### Testing
+
+- Cover plugin waits, polling timeouts, token edges, async client parity
+  ([#4](https://github.com/r-near/near-kit-py/pull/4),
+  [`7b22bf0`](https://github.com/r-near/near-kit-py/commit/7b22bf09c2926e0094d37654f2645463267dff5c))
+
+- Restore coverage measurement broken by pytest plugin autoload
+  ([#4](https://github.com/r-near/near-kit-py/pull/4),
+  [`7b22bf0`](https://github.com/r-near/near-kit-py/commit/7b22bf09c2926e0094d37654f2645463267dff5c))
+
+
 ## v1.2.0 (2026-07-21)
 
 ### Bug Fixes
